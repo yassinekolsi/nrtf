@@ -1,0 +1,45 @@
+erDiagram
+    telemetry_data {
+        UUID id PK
+        BIGINT timestamp_ms 
+        VARCHAR node_id "e.g. edge_node_01"
+        VARCHAR sensor_id "e.g. TT02, FM01"
+        VARCHAR type "temperature, flow, power"
+        FLOAT value 
+        VARCHAR unit 
+        VARCHAR quality 
+    }
+
+    documents {
+        UUID id PK
+        VARCHAR filename 
+        VARCHAR doc_type "STEG_GAS, STEG_ELECTRICITY"
+        VARCHAR supplier "STEG, SONEDE"
+        VARCHAR billing_month "e.g. 05/2025"
+        JSONB raw_json "DUMP ALL 30+ STEG FIELDS HERE (Index ancien, nouveau, OII, etc.)"
+        FLOAT normalized_kwh "The only math that matters for the dashboard"
+        FLOAT co2_emissions_kg 
+    }
+
+    scada_ledger {
+        UUID id PK
+        TIMESTAMP timestamp
+        FLOAT normalized_kwh "Standardised energy for the UI"
+        FLOAT power_gross_kw "Keep this explicitly for the main chart"
+        FLOAT gas_flow_nm3h "Keep this explicitly for the main chart"
+        JSONB raw_metrics "DUMP THE OTHER 40 COLUMNS HERE (currents, temps, efficiencies)"
+    }
+
+    events_and_anomalies {
+        UUID id PK
+        TIMESTAMP timestamp 
+        VARCHAR source "EDGE_AI, SCADA_ALARM"
+        VARCHAR description "e.g. OVERFLOW_TEMP_HIGH"
+        VARCHAR severity "CRITIQUE, AVERTISSEMENT"
+        BOOLEAN acknowledged "ISO 50001 CAPA status"
+        JSONB context_data "Dump SCADA row ID or Document ID here"
+    }
+
+    documents ||--o{ events_and_anomalies : "triggers"
+    telemetry_data ||--o{ events_and_anomalies : "triggers"
+    scada_ledger ||--o{ events_and_anomalies : "triggers"

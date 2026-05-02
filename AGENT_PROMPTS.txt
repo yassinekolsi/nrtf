@@ -1,0 +1,557 @@
+================================================================================
+NRTF BACKEND — AI AGENT IMPLEMENTATION PROMPTS (v2)
+================================================================================
+Context: FastAPI + PostgreSQL (Neon) backend for an industrial AI hackathon.
+Working directory is the project root. Python 3.11+.
+
+Existing files:
+  models.py   — SQLAlchemy models: TelemetryData, Documents, ScadaLedger,
+                EventsAndAnomalies
+  schemas.py  — Pydantic schemas (Base/Create/Read) for all 4 models
+  database.py — SQLAlchemy engine + SessionLocal + Base (reads DATABASE_URL)
+  main.py     — Bare FastAPI app, table-create on startup, zero routes
+
+Hardware context (NRTF-Hardware/ repo — DO NOT MODIFY):
+  ESP32 publishes TelemetryPacket v4 JSON to MQTT topic
+  "factory/alpha/edge_node_01/telemetry"
+  device_id = "esp32s3_alpha_edge_node_01"
+  6 readings per packet:
+    sensor_id                  | type          | unit
+    dht11_temp_01              | temperature   | degC
+    dht11_hum_01               | humidity      | %RH
+    acs712_nominal_voltage_01  | voltage       | V
+    acs712_current_01          | current       | A
+    acs712_power_01            | power         | W
+    mpu6050_vib_01             | vibration_rms | g
+  Each reading: sensor_id, type, value, unit, quality (valid/suspect/invalid)
+  Packet root: device_id, timestamp_ms (epoch ms), sequence_id
+
+SCORING CONTEXT (what actually wins this hackathon):
+  Part 2: document extraction 40 pts + unit normalization 25 pts +
+          CO2 estimation 15 pts + dashboard 20 pts + docker 20 pts
+  The unit normalization and CO2 utilities are worth 40 pts combined —
+  implement them as a shared module, not inline in the route.
+
+================================================================================
+PROMPT 1 — FastAPI Foundation
+================================================================================
+Files to edit: database.py, main.py
+Files to create: routers/__init__.py
+
+1. Add to database.py a generator `get_db()` that yields SessionLocal(),
+   closes it in finally. Keep all existing code intact.
+
+2. Rewrite main.py:
+   - CORSMiddleware: origins=["*"], allow_credentials=True, allow all methods
+     and headers.
+   - Keep the startup event (Base.metadata.create_all).
+   - Include routers with prefix="/api". Wrap each include_router in
+     try/except ImportError so the app starts even before router files exist:
+       from routers import telemetry, scada, events, documents
+       app.include_router(telemetry.router, prefix="/api", tags=["telemetry"])
+       app.include_router(scada.router,     prefix="/api", tags=["scada"])
+       app.include_router(events.router,    prefix="/api", tags=["events"])
+       app.include_router(documents.router, prefix="/api", tags=["documents"])
+   - GET / → {"status": "ok", "version": "1.0.0"}
+
+3. Create routers/__init__.py (empty).
+
+================================================================================
+PROMPT 2 — Unit Normalization + CO2 Utility (utils/energy.py)
+================================================================================
+★ This is the 2nd-biggest scoring block (25 pts normalization + 15 pts CO2).
+  Build it as a standalone module so every other module imports from here.
+
+Create utils/__init__.py (empty) and utils/energy.py:
+
+─── UNIT CONVERSION ────────────────────────────────────────────────────────────
+All inputs must convert to kWh. Use these exact factors:
+
+  UNIT_TO_KWH = {
+    "kwh":   1.0,
+    "kWh":   1.0,
+    "mwh":   1000.0,
+    "MWh":   1000.0,
+    "gwh":   1_000_000.0,
+    "GWh":   1_000_000.0,
+    "wh":    0.001,
+    "Wh":    0.001,
+    "gcal":  1162.22,       # 1 Gcal = 1162.22 kWh
+    "Gcal":  1162.22,
+    "mcal":  1.16222,       # 1 Mcal = 1.16222 kWh
+    "Mcal":  1.16222,
+    "kcal":  0.001163,
+    "btu":   0.000293071,
+    "BTU":   0.000293071,
+    "mmbtu": 293.071,       # 1 MMBTU = 293.071 kWh
+    "MMBTU": 293.071,
+    "toe":   11630.0,       # 1 toe = 11630 kWh
+    "TOE":   11630.0,
+    "tep":   11630.0,       # French equivalent of toe
+    "TEP":   11630.0,
+    "gj":    277.778,       # 1 GJ = 277.778 kWh
+    "GJ":    277.778,
+    "mj":    0.277778,
+    "MJ":    0.277778,
+    "nm3":   None,          # gas volume — needs calorific value, handled separately
+    "Nm3":   None,
+    "thermie": 1.163,       # 1 thermie = 1.163 kWh
+    "Thermie": 1.163,
+  }
+
+Implement:
+  def normalize_to_kwh(value: float, unit: str) -> float:
+    - Normalize unit string: strip whitespace, try exact key, then lowercase key.
+    - If unit is "nm3" or "Nm3": raise ValueError("gas volume requires PCI factor
+      — use normalize_gas_to_kwh()").
+    - If unit not found: raise ValueError(f"unknown unit: {unit!r}").
+    - Return value * factor.
+
+  def normalize_gas_to_kwh(volume_nm3: float, pci_thermie_per_nm3: float) -> float:
+    - Convert gas volume to kWh: volume_nm3 * pci_thermie_per_nm3 * 1.163
+    - (PCI in thermie/Nm3, 1 thermie = 1.163 kWh)
+    - Return the result.
+
+─── CO2 EMISSION FACTORS ───────────────────────────────────────────────────────
+  CO2_FACTORS_KG_PER_KWH = {
+    "electricity": 0.2670,  # Tunisia grid 2024 (ANME reference)
+    "natural_gas": 0.2010,  # 0.201 kg CO2/kWh gas (lower heating value)
+    "fuel_oil":    0.2670,
+    "coal":        0.3410,
+    "default":     0.2670,
+  }
+
+  def estimate_co2_kg(normalized_kwh: float, energy_type: str = "default") -> float:
+    - Look up factor from CO2_FACTORS_KG_PER_KWH (case-insensitive, strip spaces).
+    - Fall back to "default" if energy_type not found.
+    - Return normalized_kwh * factor.
+
+─── ANOMALY DETECTION HELPERS ──────────────────────────────────────────────────
+  SENSOR_THRESHOLDS = {
+    "temperature":   {"min": 0.0,  "max": 60.0,  "spike_delta": 15.0},
+    "humidity":      {"min": 0.0,  "max": 100.0, "spike_delta": 30.0},
+    "voltage":       {"min": 0.0,  "max": 30.0,  "spike_delta": 5.0},
+    "current":       {"min": 0.0,  "max": 5.0,   "spike_delta": 2.0},
+    "power":         {"min": 0.0,  "max": None,  "spike_delta": 100.0},
+    "vibration_rms": {"min": 0.0,  "max": 8.0,   "spike_delta": 2.0,
+                      "alert_threshold": 3.0},
+  }
+
+  def check_sensor_anomaly(sensor_type: str, value: float,
+                           prev_value: float | None = None
+                           ) -> tuple[bool, str, float]:
+    - Returns (is_anomaly: bool, reason: str, confidence: float 0-1).
+    - Check: value out of range → is_anomaly=True, confidence=1.0
+    - Check: spike (abs delta > spike_delta vs prev_value) → confidence=0.85
+    - Check: vibration_rms > alert_threshold → is_anomaly=True, confidence=0.95
+    - No anomaly → (False, "", 0.0)
+
+================================================================================
+PROMPT 3 — Telemetry Routes (routers/telemetry.py)
+================================================================================
+Reference: models.py, schemas.py, database.py, utils/energy.py
+
+Create routers/telemetry.py:
+
+─── POST /telemetry ────────────────────────────────────────────────────────────
+Accepts: list[TelemetryDataCreate]
+Logic:
+  1. For each item:
+     a. Insert TelemetryData row.
+     b. Use check_sensor_anomaly(item.type, item.value) from utils/energy.py.
+        If is_anomaly OR item.quality == "invalid":
+          Insert EventsAndAnomalies:
+            source="EDGE_AI", severity="CRITIQUE", acknowledged=False
+            description = reason if reason else "Invalid sensor data"
+            context_data = {"sensor_id": item.sensor_id, "value": item.value,
+                            "confidence": confidence, "quality": item.quality}
+  2. Single bulk commit.
+  3. Return {"inserted": N, "anomalies_created": M}
+
+─── GET /telemetry/latest ──────────────────────────────────────────────────────
+Returns: list[TelemetryDataRead]
+Use raw SQL:
+  SELECT DISTINCT ON (sensor_id)
+         id, timestamp_ms, node_id, sensor_id, type, value, unit, quality
+  FROM   telemetry_data
+  ORDER  BY sensor_id, timestamp_ms DESC
+
+─── GET /telemetry/history/{sensor_id} ─────────────────────────────────────────
+Query params: limit=200
+Returns last N readings for a given sensor_id, ordered by timestamp_ms DESC.
+Used by the dashboard chart.
+
+─── GET /telemetry/stats ────────────────────────────────────────────────────────
+Returns a summary for the dashboard KPI bar:
+  {
+    "total_readings": int,
+    "anomaly_count":  int,
+    "sensors_online": int,   (count of distinct sensor_ids seen in last 5 min)
+    "last_seen_ms":   int    (most recent timestamp_ms in telemetry_data)
+  }
+Compute sensors_online with:
+  WHERE timestamp_ms >= (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT - 300000
+
+================================================================================
+PROMPT 4 — MQTT-to-HTTP Forwarder (scripts/mqtt_to_api.py)
+================================================================================
+Standalone script. Bridges hardware MQTT → our POST /api/telemetry.
+
+Env vars (python-dotenv, load from .env at project root):
+  MQTT_HOST        default "localhost"
+  MQTT_PORT        default 8883 (int)
+  MQTT_USERNAME
+  MQTT_PASSWORD
+  MQTT_TLS_ENABLED default "true" (parse "true"/"1" as True)
+  MQTT_CA_CERT     optional path to CA cert
+  API_BASE_URL     default "http://localhost:8000"
+
+MQTT topic: "factory/alpha/edge_node_01/telemetry"
+
+on_message logic:
+  1. Parse JSON payload. Skip if malformed.
+  2. timestamp_ms = packet.get("timestamp_ms", int(time.time()*1000))
+  3. node_id: strip prefix "esp32s3_alpha_" from device_id, fallback to full id.
+  4. Build list of dicts from packet["readings"], inject timestamp_ms + node_id.
+  5. POST to f"{API_BASE_URL}/api/telemetry", timeout=5s.
+  6. Print: f"[OK] seq={seq} readings={len} → {status_code}"
+     or:   f"[ERR] seq={seq}: {exc}"
+
+All exceptions caught — loop must never crash.
+Use requests for HTTP, paho-mqtt for MQTT.
+TLS: if enabled, client.tls_set(ca_certs=MQTT_CA_CERT or None).
+__main__ block: load env, connect, loop_forever().
+
+================================================================================
+PROMPT 5 — Documents Routes + Unit Normalization (routers/documents.py)
+================================================================================
+Reference: models.py, schemas.py, database.py, utils/energy.py
+
+★ This prompt covers the highest-scoring block (40 pts extraction + 25 pts
+  normalization). The OCR call is stubbed, but normalization must be REAL.
+
+Create routers/documents.py:
+
+─── POST /documents/upload ─────────────────────────────────────────────────────
+Accepts multipart/form-data:
+  file: UploadFile
+  doc_type: str       (e.g. "STEG_GAS", "STEG_ELECTRICITY", "SONEDE_WATER")
+  supplier: str       (e.g. "STEG", "SONEDE")
+  billing_month: str  (e.g. "05/2025")
+  raw_value: float    (Form — the quantity number from the bill)
+  raw_unit: str       (Form — the unit as printed, e.g. "kWh", "Gcal", "Nm3")
+  pci_factor: float   (Form, default 9.082 — only used when raw_unit is Nm3)
+  energy_type: str    (Form, default "electricity" — used for CO2 factor lookup)
+
+Logic:
+  1. Read file bytes.
+  2. Call `run_gemini_ocr(file_bytes: bytes, doc_type: str) -> dict`:
+     STUB this function with:
+       # TODO: replace with real Gemini Vision API call
+       # Expected return keys: date, energy_quantity, unit, supplier, site,
+       #   index_ancien, index_nouveau, puissance_souscrite, montant_ttc,
+       #   consommation_kwh (if electricity), volume_m3 (if water/gas)
+       return {"raw_extracted": {}, "ocr_confidence": 0.0}
+     The real implementation will be dropped in here.
+  3. Normalize energy:
+     if raw_unit.lower() in ("nm3", "nm³"):
+         normalized_kwh = normalize_gas_to_kwh(raw_value, pci_factor)
+     else:
+         normalized_kwh = normalize_to_kwh(raw_value, raw_unit)
+  4. co2_emissions_kg = estimate_co2_kg(normalized_kwh, energy_type)
+  5. raw_json = {**run_gemini_ocr result, "raw_value": raw_value,
+                 "raw_unit": raw_unit, "pci_factor": pci_factor,
+                 "normalization_factor_used": UNIT_TO_KWH.get(raw_unit, None)}
+  6. Insert Documents row, commit, return DocumentsRead.
+
+─── POST /documents/upload/excel ────────────────────────────────────────────────
+Accepts multipart/form-data:
+  file: UploadFile (Excel .xlsx or .xls)
+  doc_type, supplier, billing_month (Form strings as above)
+  energy_type: str (Form, default "electricity")
+  unit_column: str (Form — name of the column containing energy values)
+  value_column: str (Form — name of the column containing the unit)
+  pci_factor: float (Form, default 9.082)
+
+Logic:
+  1. Read file into pd.read_excel(BytesIO(file_bytes)).
+  2. For each row: extract value + unit, normalize, compute CO2.
+  3. Bulk-insert one Documents row per sheet row. Return {"inserted": N}.
+
+─── GET /documents ─────────────────────────────────────────────────────────────
+Query params: skip=0, limit=100, doc_type: str | None
+Returns: list[DocumentsRead] ordered by billing_month DESC.
+
+─── GET /documents/{doc_id} ────────────────────────────────────────────────────
+Returns DocumentsRead by UUID. 404 if not found.
+
+─── GET /documents/summary ──────────────────────────────────────────────────────
+Returns aggregated totals for dashboard KPIs:
+  {
+    "total_normalized_kwh": float,
+    "total_co2_kg":         float,
+    "by_supplier": [{"supplier": str, "total_kwh": float, "total_co2_kg": float}]
+  }
+Use GROUP BY supplier with SUM() aggregates.
+
+================================================================================
+PROMPT 6 — SCADA Ledger Routes (routers/scada.py)
+================================================================================
+Reference: models.py, schemas.py, database.py, utils/energy.py
+
+Create routers/scada.py:
+
+─── POST /scada ────────────────────────────────────────────────────────────────
+Accepts: ScadaLedgerCreate. Inserts, commits, returns ScadaLedgerRead.
+
+─── GET /scada ─────────────────────────────────────────────────────────────────
+Query params: skip=0, limit=Query(100, le=1000)
+Returns: list[ScadaLedgerRead] ordered by timestamp DESC.
+
+─── GET /scada/summary ──────────────────────────────────────────────────────────
+Dashboard KPI endpoint. Returns:
+  {
+    "total_normalized_kwh": float,
+    "avg_power_kw": float,
+    "total_co2_kg": float,   (compute as SUM(normalized_kwh) * 0.201 — gas)
+    "record_count": int
+  }
+
+─── GET /scada/{record_id} ─────────────────────────────────────────────────────
+Returns ScadaLedgerRead by UUID. 404 if not found.
+
+================================================================================
+PROMPT 7 — Events & Anomalies Routes (routers/events.py)
+================================================================================
+Reference: models.py, schemas.py, database.py
+
+Create routers/events.py:
+
+─── GET /events ────────────────────────────────────────────────────────────────
+Query params: skip=0, limit=Query(100, le=500),
+  severity: str | None, source: str | None, acknowledged: bool | None
+Returns: list[EventsAndAnomaliesRead] ordered by timestamp DESC.
+Apply optional filters only when not None.
+
+─── POST /events ───────────────────────────────────────────────────────────────
+Accepts: EventsAndAnomaliesCreate. Returns EventsAndAnomaliesRead.
+
+─── PATCH /events/{event_id}/acknowledge ────────────────────────────────────────
+Sets acknowledged=True. Returns updated row. 404 if not found.
+
+─── GET /events/stats ───────────────────────────────────────────────────────────
+Dashboard widget:
+  {
+    "total": int,
+    "unacknowledged": int,
+    "critique_count": int,
+    "by_source": [{"source": str, "count": int}]
+  }
+
+================================================================================
+PROMPT 8 — Energy Forecasting (routers/forecast.py)
+================================================================================
+★ Part 2 bonus: short-term energy prediction. Simple but must return numbers.
+
+Reference: database.py, utils/energy.py
+
+Create routers/forecast.py and wire it in main.py as:
+  app.include_router(forecast.router, prefix="/api", tags=["forecast"])
+
+─── GET /forecast/scada ─────────────────────────────────────────────────────────
+Query params: horizon_hours: int = Query(24, ge=1, le=168)
+Algorithm (no ML library needed — pure numpy/statistics):
+  1. Fetch last 7 days of scada_ledger rows ordered by timestamp.
+  2. Extract normalized_kwh series.
+  3. Compute 24-hour seasonal naive forecast:
+       for each step h in 1..horizon_hours:
+         predicted[h] = mean of historical values at the same hour-of-day
+  4. If fewer than 24 historical points, fall back to overall mean.
+  5. Return:
+     {
+       "method": "seasonal_naive_24h",
+       "horizon_hours": int,
+       "forecast": [
+         {"offset_hours": h, "predicted_kwh": float, "confidence_interval_low": float,
+          "confidence_interval_high": float}
+       ],
+       "mae_estimate": float   (mean absolute deviation of last 24h actuals vs naive)
+     }
+  Confidence interval: predicted ± 1 std deviation of residuals.
+
+─── GET /forecast/telemetry/{sensor_id} ─────────────────────────────────────────
+Query params: horizon_steps: int = Query(10, ge=1, le=60)
+Algorithm:
+  1. Fetch last 200 readings for sensor_id ordered by timestamp_ms.
+  2. Compute simple exponential smoothing (alpha=0.3):
+       s[0] = values[0]
+       s[i] = alpha * values[i] + (1-alpha) * s[i-1]
+  3. Forecast next N steps as the last smoothed value (flat forecast).
+  4. Return {"method": "exponential_smoothing", "alpha": 0.3,
+             "forecast": [{"step": i, "predicted_value": float}]}
+
+Import only: statistics (stdlib), numpy optional (use stdlib math if not available).
+
+================================================================================
+PROMPT 9 — SCADA CSV Seeder (scripts/seed_scada.py)
+================================================================================
+Reference: models.py, database.py, utils/energy.py
+
+Standalone CLI script. Usage: python scripts/seed_scada.py <path_to_csv>
+
+CSV structure (SCADA export, French headers, messy):
+  Rows 0–8   : metadata
+  Row 6      : contains PCI factor, e.g. "PCI (thermie/Nm3): 9,082"
+               (European decimal — comma is decimal separator)
+  Row 9      : column headers  (header=9 in pandas)
+  Row 10+    : numeric timeseries
+
+Column detection (case-insensitive substring match):
+  Timestamp  : "date" or "heure" or "time"
+  Power kW   : "puissance" AND "brute"  → power_gross_kw
+  Gas flow   : "debit" AND "gaz"        → gas_flow_nm3h
+
+Steps:
+  1. Read rows 0-8 with header=None, nrows=9, encoding="latin-1".
+  2. Find PCI: regex r"[\d]+[,.][\d]+" over all cell string values.
+     Replace comma→dot, cast to float. Default 9.082 if not found (warn).
+  3. Read timeseries: header=9, encoding="latin-1". Drop fully-NaN rows.
+  4. Detect column names (raise ValueError with clear message if not found).
+  5. For each row:
+     a. Parse timestamp (formats: "%d/%m/%Y %H:%M", "%Y-%m-%d %H:%M:%S",
+        pd.to_datetime auto fallback).
+     b. power_gross_kw = float(row[power_col]), skip if NaN.
+     c. gas_flow_nm3h  = float(row[gas_col]),  skip if NaN.
+     d. normalized_kwh = normalize_gas_to_kwh(gas_flow_nm3h, pci_factor)
+        (import from utils.energy)
+     e. raw_metrics = {k: v for k, v in row.items() if pd.notna(v)}
+        Convert numpy scalars: use float(v) if isinstance v numpy.floating, etc.
+     f. Build ScadaLedger ORM object.
+  6. Bulk session.add_all(records), session.commit().
+  7. Print "Seeded {N} records into scada_ledger."
+
+After seeding, run a pass to create SCADA_ALARM events for rows where
+normalized_kwh exceeds the 95th percentile (use statistics.quantiles):
+  For each such row insert EventsAndAnomalies:
+    source="SCADA_ALARM", severity="AVERTISSEMENT", acknowledged=False
+    description="High energy consumption detected"
+    context_data={"normalized_kwh": val, "threshold_95pct": threshold}
+
+================================================================================
+PROMPT 10 — Docker Compose Setup
+================================================================================
+★ 20 free points. Build this early — it also forces clean env var discipline.
+
+Create these files at project root:
+
+─── Dockerfile ─────────────────────────────────────────────────────────────────
+FROM python:3.11-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+EXPOSE 8000
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+─── docker-compose.yml ──────────────────────────────────────────────────────────
+version: "3.9"
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    depends_on:
+      - mqtt_forwarder
+    restart: unless-stopped
+
+  mqtt_forwarder:
+    build: .
+    command: python scripts/mqtt_to_api.py
+    env_file:
+      - .env
+    environment:
+      - API_BASE_URL=http://api:8000
+    restart: unless-stopped
+
+Note: DATABASE_URL must be in .env pointing to Neon (external). No local
+postgres container needed — we use Neon. Add a .env.example with all required
+keys documented (but no actual values):
+  DATABASE_URL=
+  MQTT_HOST=
+  MQTT_PORT=8883
+  MQTT_USERNAME=
+  MQTT_PASSWORD=
+  MQTT_TLS_ENABLED=true
+  MQTT_CA_CERT=
+  GEMINI_API_KEY=
+
+─── requirements.txt ────────────────────────────────────────────────────────────
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.9
+pydantic>=2.7.0
+python-multipart>=0.0.9
+paho-mqtt>=2.0.0
+requests>=2.31.0
+pandas>=2.2.0
+openpyxl>=3.1.0
+python-dotenv>=1.0.0
+numpy>=1.26.0
+google-generativeai>=0.5.0
+
+================================================================================
+IMPLEMENTATION ORDER
+================================================================================
+  1  → Foundation (get_db, CORS, router wiring)
+  2  → utils/energy.py  ← DO THIS EARLY, everything imports it
+  3  → Telemetry routes
+  4  → MQTT forwarder script
+  5  → Documents routes (normalization is real; OCR is stubbed)
+  6  → SCADA ledger routes
+  7  → Events routes
+  8  → Forecast routes
+  9  → SCADA CSV seeder
+  10 → Docker + requirements.txt  ← do this before the demo, not last
+
+After Prompt 2, run: python -c "from utils.energy import normalize_to_kwh;
+  print(normalize_to_kwh(1, 'Gcal'))"  → should print 1162.22
+
+After all prompts test with:
+  uvicorn main:app --reload
+  curl http://localhost:8000/
+  docker compose up --build   ← must work cold
+
+================================================================================
+KNOWN CONSTRAINTS & GOTCHAS
+================================================================================
+- DISTINCT ON is PostgreSQL-only. Use sqlalchemy.text(), never ORM .all().
+
+- node_id mapping: "esp32s3_alpha_edge_node_01" → "edge_node_01"
+  (strip "esp32s3_alpha_" prefix). Hardcode this transform in the forwarder.
+
+- SCADA CSV: French column names, latin-1 encoding, comma as decimal separator
+  in the PCI factor row. PCI unit is thermie/Nm3, not kWh/Nm3. Factor 1.163
+  converts thermie→kWh.
+
+- normalized_kwh for SCADA = gas_flow_nm3h * pci_factor * 1.163
+  This is hours-based (kWh per record interval). If records are every 10 min,
+  divide by 6 to get per-interval kWh. Check interval from timestamp diffs.
+
+- vibration_rms alert threshold = 3.0 g (hardware range 0–8 g, normal < 2 g).
+
+- Documents.normalized_kwh and co2_emissions_kg are NOT NULL. The upload
+  endpoint computes them from raw_value + raw_unit before insert, not from OCR.
+
+- EventsAndAnomalies.acknowledged: always pass explicitly — never rely on DB
+  default since the column is NOT NULL.
+
+- CO2 factor for gas (SCADA/STEG_GAS): 0.201 kg CO2/kWh
+  CO2 factor for electricity (STEG_ELECTRICITY): 0.267 kg CO2/kWh (Tunisia grid)
+
+- For Docker: DATABASE_URL must use the Neon connection string directly.
+  Do NOT try to add a postgres container — Neon is already provisioned.
+
+================================================================================
