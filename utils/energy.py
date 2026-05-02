@@ -34,7 +34,7 @@ UNIT_TO_KWH = {
 
 CO2_FACTORS_KG_PER_KWH = {
     "electricity": 0.2670,
-    "natural_gas": 0.2010,
+    "natural_gas": 0.2020,
     "fuel_oil": 0.2670,
     "coal": 0.3410,
     "default": 0.2670,
@@ -111,4 +111,3 @@ def check_sensor_anomaly(
         return True, f"{sensor_type} exceeds alert threshold", 0.95
 
     return False, "", 0.0
-

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import {
   BarChart,
@@ -24,25 +24,160 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { monthlyConsumptionData, stegBillingData, stegTotalAmount } from "@/lib/mockData";
+import { Skeleton } from "@/components/ui/skeleton";
+import {
+  fetchDocuments,
+  fetchDocumentsSummary,
+  type DocumentRecord,
+  type DocumentsSummary,
+} from "@/lib/api-client";
 import { useLanguage } from "@/lib/language-context";
+
+interface MonthlyEnergyRow {
+  month: string;
+  monthKey: string;
+  gasKWh: number;
+  stegKWh: number;
+  co2Kg: number;
+}
+
+function formatNumber(value: number, digits = 0) {
+  return Number(value.toFixed(digits)).toLocaleString();
+}
+
+function rawNumber(document: DocumentRecord, key: string) {
+  const canonical = document.raw_json.canonical;
+  if (!canonical || typeof canonical !== "object") return null;
+
+  const value = (canonical as Record<string, unknown>)[key];
+  return typeof value === "number" ? value : null;
+}
+
+function monthLabel(month: string | null) {
+  if (!month) return "Unknown";
+  const [monthPart, yearPart] = month.split("/");
+  if (!monthPart || !yearPart) return month;
+  const date = new Date(Number(yearPart), Number(monthPart) - 1, 1);
+  return date.toLocaleDateString("fr-FR", { month: "short", year: "numeric" });
+}
+
+function buildMonthlyRows(electricityDocs: DocumentRecord[], gasDocs: DocumentRecord[]) {
+  const rows = new Map<string, MonthlyEnergyRow>();
+
+  const ensureRow = (doc: DocumentRecord) => {
+    const key = doc.billing_month ?? "unknown";
+    const existing = rows.get(key);
+    if (existing) return existing;
+
+    const row = {
+      month: monthLabel(doc.billing_month),
+      monthKey: key,
+      gasKWh: 0,
+      stegKWh: 0,
+      co2Kg: 0,
+    };
+    rows.set(key, row);
+    return row;
+  };
+
+  electricityDocs.forEach((doc) => {
+    const row = ensureRow(doc);
+    row.stegKWh += doc.normalized_kwh ?? 0;
+    row.co2Kg += doc.co2_emissions_kg ?? 0;
+  });
+
+  gasDocs.forEach((doc) => {
+    const row = ensureRow(doc);
+    row.gasKWh += doc.normalized_kwh ?? 0;
+    row.co2Kg += doc.co2_emissions_kg ?? 0;
+  });
+
+  return Array.from(rows.values()).sort((a, b) => a.monthKey.localeCompare(b.monthKey));
+}
 
 export default function EnergiePage() {
   const { t } = useLanguage();
   const [activeTab, setActiveTab] = useState("consumption");
+  const [summary, setSummary] = useState<DocumentsSummary | null>(null);
+  const [electricityDocs, setElectricityDocs] = useState<DocumentRecord[]>([]);
+  const [gasDocs, setGasDocs] = useState<DocumentRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  // Transform data for chart
-  const chartData = monthlyConsumptionData.map((d) => ({
-    month: d.month,
-    [t.gas]: Math.round(d.gazKWh / 1000),
-    [t.autoproduction]: Math.round(d.autoproductionKWh / 1000),
-    [`${t.stegImport} (MWh)`]: Math.round(d.importSTEGKWh / 1000),
+  useEffect(() => {
+    async function loadEnergyData() {
+      try {
+        setLoading(true);
+        const [summaryResult, electricityResult, gasResult] = await Promise.all([
+          fetchDocumentsSummary(),
+          fetchDocuments({ doc_type: "STEG_ELECTRICITY", limit: 12 }),
+          fetchDocuments({ doc_type: "STEG_GAS", limit: 12 }),
+        ]);
+
+        setSummary(summaryResult);
+        setElectricityDocs(electricityResult);
+        setGasDocs(gasResult);
+        setError(null);
+      } catch (loadError) {
+        setError(loadError instanceof Error ? loadError.message : "Energy data unavailable");
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    loadEnergyData();
+  }, []);
+
+  const monthlyRows = useMemo(
+    () => buildMonthlyRows(electricityDocs, gasDocs),
+    [electricityDocs, gasDocs],
+  );
+
+  const chartData = monthlyRows.map((row) => ({
+    month: row.month,
+    [t.gas]: Math.round(row.gasKWh / 1000),
+    [`${t.stegImport} (MWh)`]: Math.round(row.stegKWh / 1000),
   }));
+
+  const totalAmount = electricityDocs.reduce(
+    (sum, doc) => sum + (rawNumber(doc, "amount_ttc") ?? 0),
+    0,
+  );
+  const hasDocuments = electricityDocs.length > 0 || gasDocs.length > 0;
 
   return (
     <div className="space-y-6">
       {/* Page Title */}
-      <h1 className="text-2xl font-bold text-foreground">{t.energy}</h1>
+      <div>
+        <h1 className="text-2xl font-bold text-foreground">{t.energy}</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          {formatNumber(summary?.total_normalized_kwh ?? 0)} kWh / {formatNumber(summary?.total_co2_kg ?? 0)} kg CO2
+        </p>
+      </div>
+
+      {error && (
+        <div className="rounded-md border border-border bg-muted/30 p-3 text-sm text-muted-foreground">
+          {error}
+        </div>
+      )}
+
+      {summary?.by_supplier.length ? (
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+          {summary.by_supplier.map((supplier) => (
+            <Card key={supplier.supplier} className="border-border bg-card">
+              <CardContent className="p-5">
+                <p className="text-sm font-medium text-muted-foreground">{supplier.supplier}</p>
+                <p className="mt-2 text-2xl font-bold text-foreground">
+                  {formatNumber(supplier.total_kwh)} kWh
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {formatNumber(supplier.total_co2_kg)} kg CO2
+                </p>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      ) : null}
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
         <TabsList className="grid w-full max-w-md grid-cols-2">
@@ -65,49 +200,52 @@ export default function EnergiePage() {
             </CardHeader>
             <CardContent>
               <div className="h-[350px] w-full">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart
-                    data={chartData}
-                    margin={{ top: 20, right: 30, left: 20, bottom: 5 }}
-                  >
-                    <CartesianGrid strokeDasharray="3 3" className="stroke-border" />
-                    <XAxis
-                      dataKey="month"
-                      tick={{ fontSize: 12 }}
-                      tickLine={false}
-                      axisLine={false}
-                    />
-                    <YAxis
-                      tick={{ fontSize: 12 }}
-                      tickLine={false}
-                      axisLine={false}
-                    />
-                    <Tooltip
-                      contentStyle={{
-                        backgroundColor: "var(--card)",
-                        border: "1px solid var(--border)",
-                        borderRadius: "8px",
-                        fontSize: "14px",
-                      }}
-                    />
-                    <Legend wrapperStyle={{ fontSize: "14px", paddingTop: "16px" }} />
-                    <Bar
-                      dataKey={t.gas}
-                      fill="var(--chart-3)"
-                      radius={[4, 4, 0, 0]}
-                    />
-                    <Bar
-                      dataKey={t.autoproduction}
-                      fill="var(--chart-1)"
-                      radius={[4, 4, 0, 0]}
-                    />
-                    <Bar
-                      dataKey={`${t.stegImport} (MWh)`}
-                      fill="var(--chart-2)"
-                      radius={[4, 4, 0, 0]}
-                    />
-                  </BarChart>
-                </ResponsiveContainer>
+                {loading ? (
+                  <Skeleton className="h-full w-full" />
+                ) : !hasDocuments ? (
+                  <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                    No documents uploaded yet
+                  </div>
+                ) : (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart
+                      data={chartData}
+                      margin={{ top: 20, right: 30, left: 20, bottom: 5 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" className="stroke-border" />
+                      <XAxis
+                        dataKey="month"
+                        tick={{ fontSize: 12 }}
+                        tickLine={false}
+                        axisLine={false}
+                      />
+                      <YAxis
+                        tick={{ fontSize: 12 }}
+                        tickLine={false}
+                        axisLine={false}
+                      />
+                      <Tooltip
+                        contentStyle={{
+                          backgroundColor: "var(--card)",
+                          border: "1px solid var(--border)",
+                          borderRadius: "8px",
+                          fontSize: "14px",
+                        }}
+                      />
+                      <Legend wrapperStyle={{ fontSize: "14px", paddingTop: "16px" }} />
+                      <Bar
+                        dataKey={t.gas}
+                        fill="var(--chart-3)"
+                        radius={[4, 4, 0, 0]}
+                      />
+                      <Bar
+                        dataKey={`${t.stegImport} (MWh)`}
+                        fill="var(--chart-2)"
+                        radius={[4, 4, 0, 0]}
+                      />
+                    </BarChart>
+                  </ResponsiveContainer>
+                )}
               </div>
             </CardContent>
           </Card>
@@ -132,23 +270,35 @@ export default function EnergiePage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {monthlyConsumptionData.map((row) => (
+                  {loading ? (
+                    <TableRow>
+                      <TableCell colSpan={6}>
+                        <Skeleton className="h-10 w-full" />
+                      </TableCell>
+                    </TableRow>
+                  ) : monthlyRows.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={6} className="py-8 text-center text-muted-foreground">
+                        No documents uploaded yet
+                      </TableCell>
+                    </TableRow>
+                  ) : monthlyRows.map((row) => (
                     <TableRow key={row.monthKey}>
                       <TableCell className="text-[15px] font-medium">{row.month}</TableCell>
                       <TableCell className="text-right text-[15px]">
-                        {row.gazNm3.toLocaleString()}
+                        -
                       </TableCell>
                       <TableCell className="text-right text-[15px]">
-                        {row.gazKWh.toLocaleString()}
+                        {formatNumber(row.gasKWh)}
                       </TableCell>
                       <TableCell className="text-right text-[15px] text-energy-green">
-                        {row.autoproductionKWh.toLocaleString()}
+                        -
                       </TableCell>
                       <TableCell className="text-right text-[15px]">
-                        {row.importSTEGKWh.toLocaleString()}
+                        {formatNumber(row.stegKWh)}
                       </TableCell>
                       <TableCell className="text-right text-[15px] text-energy-green">
-                        {row.co2Evite}
+                        {formatNumber(row.co2Kg / 1000, 2)}
                       </TableCell>
                     </TableRow>
                   ))}
@@ -184,22 +334,34 @@ export default function EnergiePage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {stegBillingData.map((row, i) => (
-                    <TableRow key={i}>
+                  {loading ? (
+                    <TableRow>
+                      <TableCell colSpan={5}>
+                        <Skeleton className="h-10 w-full" />
+                      </TableCell>
+                    </TableRow>
+                  ) : electricityDocs.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={5} className="py-8 text-center text-muted-foreground">
+                        No documents uploaded yet
+                      </TableCell>
+                    </TableRow>
+                  ) : electricityDocs.map((row) => (
+                    <TableRow key={row.id}>
                       <TableCell className="text-[15px] font-medium">
-                        {row.trancheHoraire}
+                        {row.billing_month ?? "-"}
                       </TableCell>
                       <TableCell className="text-[15px] font-mono">
-                        {row.code}
+                        {row.doc_type}
                       </TableCell>
                       <TableCell className="text-right text-[15px] font-mono">
-                        {row.ancienIndex.toLocaleString()}
+                        {rawNumber(row, "index_ancien")?.toLocaleString() ?? "-"}
                       </TableCell>
                       <TableCell className="text-right text-[15px] font-mono">
-                        {row.nouvelIndex.toLocaleString()}
+                        {rawNumber(row, "index_nouveau")?.toLocaleString() ?? "-"}
                       </TableCell>
                       <TableCell className="text-right text-[15px] font-semibold">
-                        {row.consommationKWh.toLocaleString()}
+                        {formatNumber(row.normalized_kwh ?? 0)}
                       </TableCell>
                     </TableRow>
                   ))}
@@ -212,7 +374,7 @@ export default function EnergiePage() {
                   {t.totalAmount}
                 </p>
                 <p className="mt-1 text-3xl font-bold text-foreground">
-                  {stegTotalAmount}
+                  {totalAmount > 0 ? `${formatNumber(totalAmount, 2)} DT TTC` : "-"}
                 </p>
               </div>
             </CardContent>

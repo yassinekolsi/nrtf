@@ -4,12 +4,13 @@ import { useEffect, useState } from "react";
 import { Bell, Globe } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useLanguage } from "@/lib/language-context";
-import { activeAlarms } from "@/lib/mockData";
+import { fetchEventStats } from "@/lib/api-client";
 
 export function TopBar() {
   const { language, setLanguage, t } = useLanguage();
   const [currentTime, setCurrentTime] = useState<string>("");
   const [currentDate, setCurrentDate] = useState<string>("");
+  const [alarmCount, setAlarmCount] = useState(0);
 
   useEffect(() => {
     const updateDateTime = () => {
@@ -36,7 +37,20 @@ export function TopBar() {
     return () => clearInterval(interval);
   }, [language]);
 
-  const alarmCount = activeAlarms.filter((a) => a.status === "En cours").length;
+  useEffect(() => {
+    async function loadAlarmCount() {
+      try {
+        const stats = await fetchEventStats();
+        setAlarmCount(stats.unacknowledged);
+      } catch {
+        setAlarmCount(0);
+      }
+    }
+
+    loadAlarmCount();
+    const interval = window.setInterval(loadAlarmCount, 30_000);
+    return () => window.clearInterval(interval);
+  }, []);
 
   const toggleLanguage = () => {
     setLanguage(language === "en" ? "fr" : "en");

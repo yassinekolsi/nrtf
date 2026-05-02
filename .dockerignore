@@ -1,0 +1,12 @@
+.env
+.git
+.next
+node_modules
+__pycache__
+*.py[cod]
+.venv
+venv
+NRTF-Hardware
+frontend_node_modules
+frontend_next
+tsconfig.tsbuildinfo

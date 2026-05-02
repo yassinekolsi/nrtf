@@ -1,12 +1,11 @@
 "use client";
 
-import { useState } from "react";
 import { AlertTriangle, AlertCircle, Info } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
-import { activeAlarms, Alarm } from "@/lib/mockData";
 import { useLanguage } from "@/lib/language-context";
 
 const severityConfig = {
@@ -27,21 +26,31 @@ const severityConfig = {
   },
 };
 
-export function ActiveAlarms() {
+export interface ActiveAlarmItem {
+  id: string;
+  timestamp: string;
+  equipment: string;
+  description: string;
+  severity: "Critique" | "Moyen" | "Info";
+  status: "En cours" | "Acquitté";
+}
+
+interface ActiveAlarmsProps {
+  alarms: ActiveAlarmItem[];
+  activeCount: number;
+  loading?: boolean;
+  error?: string | null;
+  onAcknowledge?: (alarmId: string) => void;
+}
+
+export function ActiveAlarms({
+  alarms,
+  activeCount,
+  loading = false,
+  error = null,
+  onAcknowledge,
+}: ActiveAlarmsProps) {
   const { t } = useLanguage();
-  const [alarms, setAlarms] = useState<Alarm[]>(activeAlarms);
-
-  const handleAcknowledge = (alarmId: string) => {
-    setAlarms((prev) =>
-      prev.map((alarm) =>
-        alarm.id === alarmId
-          ? { ...alarm, status: "Acquitté" as const, acknowledged_at: new Date().toISOString() }
-          : alarm
-      )
-    );
-  };
-
-  const activeCount = alarms.filter((a) => a.status === "En cours").length;
 
   return (
     <Card className="border-border bg-card">
@@ -57,7 +66,16 @@ export function ActiveAlarms() {
       </CardHeader>
       <CardContent>
         <div className="space-y-3">
-          {alarms.filter((a) => a.status === "En cours").length === 0 ? (
+          {loading ? (
+            <>
+              <Skeleton className="h-16 w-full" />
+              <Skeleton className="h-16 w-full" />
+            </>
+          ) : error ? (
+            <p className="py-4 text-center text-sm text-muted-foreground">
+              {error}
+            </p>
+          ) : alarms.filter((a) => a.status === "En cours").length === 0 ? (
             <p className="py-4 text-center text-muted-foreground">
               {t.activeAlarms}: 0
             </p>
@@ -89,7 +107,7 @@ export function ActiveAlarms() {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => handleAcknowledge(alarm.id)}
+                        onClick={() => onAcknowledge?.(alarm.id)}
                         className="text-xs"
                       >
                         {t.acknowledge}

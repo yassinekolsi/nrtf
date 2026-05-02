@@ -1,5 +1,6 @@
 "use client";
 
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   LineChart,
   Line,
@@ -9,20 +10,27 @@ import {
   Tooltip,
   ResponsiveContainer,
   ReferenceLine,
-  Dot,
 } from "recharts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
+import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
 import { KPICard } from "@/components/kpi-card";
-import { currentKPIs, last30DaysProduction } from "@/lib/mockData";
+import {
+  fetchScadaSummary,
+  fetchTelemetryHistory,
+  fetchTelemetryLatest,
+  type ScadaSummary,
+  type TelemetryReading,
+} from "@/lib/api-client";
 import { useLanguage } from "@/lib/language-context";
 import { cn } from "@/lib/utils";
 
-// Custom dot component for temperature chart to highlight anomalies
+// Custom dot component for quality anomalies.
 function CustomDot(props: { cx?: number; cy?: number; payload?: { isAnomaly: boolean } }) {
   const { cx, cy, payload } = props;
   if (!cx || !cy || !payload) return null;
-  
+
   if (payload.isAnomaly) {
     return (
       <circle
@@ -38,186 +46,308 @@ function CustomDot(props: { cx?: number; cy?: number; payload?: { isAnomaly: boo
   return null;
 }
 
+const SENSOR_IDS = {
+  power: "acs712_power_01",
+  current: "acs712_current_01",
+  voltage: "acs712_nominal_voltage_01",
+  vibration: "mpu6050_vib_01",
+};
+
+interface PowerHistoryPoint {
+  date: string;
+  powerKW: number;
+  isAnomaly: boolean;
+}
+
+function getReading(readings: TelemetryReading[], sensorId: string) {
+  return readings.find((reading) => reading.sensor_id === sensorId);
+}
+
+function formatValue(value: number | undefined, digits = 1) {
+  return typeof value === "number" ? Number(value.toFixed(digits)) : "--";
+}
+
 export default function TrigenerationPage() {
   const { t } = useLanguage();
+  const [latestReadings, setLatestReadings] = useState<TelemetryReading[]>([]);
+  const [history, setHistory] = useState<PowerHistoryPoint[]>([]);
+  const [scadaSummary, setScadaSummary] = useState<ScadaSummary | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  // Determine temperature status
-  const tempStatus: "good" | "warning" | "critical" = 
-    currentKPIs.eauGlaceeTT01 <= 9 ? "good" : 
-    currentKPIs.eauGlaceeTT01 <= 12 ? "warning" : "critical";
+  const loadLatest = useCallback(async () => {
+    try {
+      const readings = await fetchTelemetryLatest();
+      setLatestReadings(readings);
+      setError(null);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Telemetry unavailable");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
-  // Calculate utilization percentage
-  const utilizationPercent = Math.round(
-    (currentKPIs.absorptionPuissanceMesuree / currentKPIs.absorptionPuissanceNominale) * 100
+  useEffect(() => {
+    async function loadPageData() {
+      try {
+        setLoading(true);
+        const [latestResult, historyResult, scadaResult] = await Promise.allSettled([
+          fetchTelemetryLatest(),
+          fetchTelemetryHistory(SENSOR_IDS.power, 200),
+          fetchScadaSummary(),
+        ]);
+
+        if (latestResult.status === "fulfilled") {
+          setLatestReadings(latestResult.value);
+        }
+        if (historyResult.status === "fulfilled") {
+          setHistory(
+            historyResult.value
+              .slice()
+              .sort((a, b) => a.timestamp_ms - b.timestamp_ms)
+              .map((reading) => ({
+                date: new Date(reading.timestamp_ms).toLocaleTimeString("fr-FR", {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                }),
+                powerKW: reading.value / 1000,
+                isAnomaly: reading.quality.toLowerCase() !== "valid",
+              })),
+          );
+        }
+        if (scadaResult.status === "fulfilled") {
+          setScadaSummary(scadaResult.value);
+        }
+
+        const firstError = [latestResult, historyResult, scadaResult].find(
+          (result) => result.status === "rejected",
+        );
+        if (firstError?.status === "rejected") {
+          setError(
+            firstError.reason instanceof Error ? firstError.reason.message : "Trigeneration data unavailable",
+          );
+        } else {
+          setError(null);
+        }
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    loadPageData();
+    const interval = window.setInterval(loadLatest, 10_000);
+    return () => window.clearInterval(interval);
+  }, [loadLatest]);
+
+  const sensors = useMemo(
+    () => ({
+      power: getReading(latestReadings, SENSOR_IDS.power),
+      current: getReading(latestReadings, SENSOR_IDS.current),
+      voltage: getReading(latestReadings, SENSOR_IDS.voltage),
+      vibration: getReading(latestReadings, SENSOR_IDS.vibration),
+    }),
+    [latestReadings],
+  );
+
+  const powerKW = sensors.power ? sensors.power.value / 1000 : undefined;
+  const utilizationPercent = Math.min(
+    100,
+    Math.max(0, Math.round(((scadaSummary?.avg_power_kw ?? powerKW ?? 0) / 1200) * 100)),
   );
 
   return (
     <div className="space-y-6">
       {/* Page Title */}
-      <h1 className="text-2xl font-bold text-foreground">{t.trigeneration}</h1>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h1 className="text-2xl font-bold text-foreground">{t.trigeneration}</h1>
+        <Badge className="bg-energy-green text-energy-green-foreground">
+          Live from ESP32
+        </Badge>
+      </div>
+
+      {error && (
+        <div className="rounded-md border border-border bg-muted/30 p-3 text-sm text-muted-foreground">
+          {error}
+        </div>
+      )}
 
       {/* KPI Cards */}
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
         <KPICard
           label={t.activePower}
-          value={currentKPIs.puissanceMoteur}
+          value={formatValue(powerKW, 2)}
           unit={t.kw}
           status="good"
+          subtitle={sensors.power?.sensor_id ?? "No reading"}
         />
         <KPICard
-          label={t.chilledWater}
-          value={currentKPIs.eauGlaceeTT01}
-          unit={t.celsius}
-          status={tempStatus}
+          label="Current"
+          value={formatValue(sensors.current?.value, 2)}
+          unit="A"
+          status="normal"
         />
         <KPICard
-          label={t.hotWater}
-          value={currentKPIs.eauChaudeTT03}
-          unit={t.celsius}
+          label="Voltage"
+          value={formatValue(sensors.voltage?.value, 1)}
+          unit="V"
           status="good"
         />
         <KPICard
-          label={t.engineHours}
-          value={currentKPIs.heuresMoteur.toLocaleString()}
-          unit={t.hours}
-          status="normal"
+          label="Vibration"
+          value={formatValue(sensors.vibration?.value, 2)}
+          unit={sensors.vibration?.unit || ""}
+          status={sensors.vibration?.value && sensors.vibration.value > 2 ? "warning" : "good"}
         />
       </div>
 
       {/* Charts Row */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        {/* Daily Production Chart */}
+        {/* Power Chart */}
         <Card className="border-border bg-card">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-lg font-semibold">
-              {t.dailyElectricalProduction} (kWh/day)
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="h-[250px] w-full">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart
-                  data={last30DaysProduction}
-                  margin={{ top: 10, right: 20, left: 10, bottom: 5 }}
-                >
-                  <CartesianGrid strokeDasharray="3 3" className="stroke-border" />
-                  <XAxis
-                    dataKey="date"
-                    tick={{ fontSize: 11 }}
-                    tickLine={false}
-                    axisLine={false}
-                    interval={4}
-                  />
-                  <YAxis
-                    tick={{ fontSize: 11 }}
-                    tickLine={false}
-                    axisLine={false}
-                    domain={[27000, 30000]}
-                    tickFormatter={(v) => `${(v / 1000).toFixed(0)}k`}
-                  />
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: "var(--card)",
-                      border: "1px solid var(--border)",
-                      borderRadius: "8px",
-                      fontSize: "13px",
-                    }}
-                    formatter={(value: number) => [`${value.toLocaleString()} kWh`, "Production"]}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="productionKWh"
-                    stroke="var(--chart-1)"
-                    strokeWidth={2}
-                    dot={false}
-                    activeDot={{ r: 4 }}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-          </CardContent>
-        </Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-lg font-semibold">
+              {t.dailyElectricalProduction} ({t.kw})
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="h-[250px] w-full">
+                {loading ? (
+                  <Skeleton className="h-full w-full" />
+                ) : history.length === 0 ? (
+                  <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                    No telemetry history yet
+                  </div>
+                ) : (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart
+                      data={history}
+                      margin={{ top: 10, right: 20, left: 10, bottom: 5 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" className="stroke-border" />
+                      <XAxis
+                        dataKey="date"
+                        tick={{ fontSize: 11 }}
+                        tickLine={false}
+                        axisLine={false}
+                        interval="preserveStartEnd"
+                      />
+                      <YAxis
+                        tick={{ fontSize: 11 }}
+                        tickLine={false}
+                        axisLine={false}
+                        tickFormatter={(v: number) => `${v.toFixed(1)}`}
+                      />
+                      <Tooltip
+                        contentStyle={{
+                          backgroundColor: "var(--card)",
+                          border: "1px solid var(--border)",
+                          borderRadius: "8px",
+                          fontSize: "13px",
+                        }}
+                        formatter={(value: number) => [`${value.toFixed(2)} ${t.kw}`, "Power"]}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="powerKW"
+                        stroke="var(--chart-1)"
+                        strokeWidth={2}
+                        dot={false}
+                        activeDot={{ r: 4 }}
+                      />
+                    </LineChart>
+                  </ResponsiveContainer>
+                )}
+              </div>
+            </CardContent>
+          </Card>
 
-        {/* Temperature Chart */}
+        {/* Quality Chart */}
         <Card className="border-border bg-card">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-lg font-semibold">
-              {t.chilledWaterTemp} (°C)
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="h-[250px] w-full">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart
-                  data={last30DaysProduction}
-                  margin={{ top: 10, right: 20, left: 10, bottom: 5 }}
-                >
-                  <CartesianGrid strokeDasharray="3 3" className="stroke-border" />
-                  <XAxis
-                    dataKey="date"
-                    tick={{ fontSize: 11 }}
-                    tickLine={false}
-                    axisLine={false}
-                    interval={4}
-                  />
-                  <YAxis
-                    tick={{ fontSize: 11 }}
-                    tickLine={false}
-                    axisLine={false}
-                    domain={[0, 20]}
-                  />
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: "var(--card)",
-                      border: "1px solid var(--border)",
-                      borderRadius: "8px",
-                      fontSize: "13px",
-                    }}
-                    formatter={(value: number, name: string, props: { payload?: { isAnomaly: boolean } }) => {
-                      const isAnomaly = props.payload?.isAnomaly;
-                      return [`${value}°C ${isAnomaly ? "(ANOMALY)" : ""}`, "TT01"];
-                    }}
-                  />
-                  <ReferenceLine
-                    y={12}
-                    stroke="var(--alarm-red)"
-                    strokeDasharray="5 5"
-                    label={{ value: "Limit 12°C", position: "right", fontSize: 11 }}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="tempTT01"
-                    stroke="var(--chart-5)"
-                    strokeWidth={2}
-                    dot={<CustomDot />}
-                    activeDot={{ r: 4 }}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-          </CardContent>
-        </Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-lg font-semibold">
+              Power Quality
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="h-[250px] w-full">
+                {loading ? (
+                  <Skeleton className="h-full w-full" />
+                ) : history.length === 0 ? (
+                  <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                    No telemetry history yet
+                  </div>
+                ) : (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart
+                      data={history}
+                      margin={{ top: 10, right: 20, left: 10, bottom: 5 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" className="stroke-border" />
+                      <XAxis
+                        dataKey="date"
+                        tick={{ fontSize: 11 }}
+                        tickLine={false}
+                        axisLine={false}
+                        interval="preserveStartEnd"
+                      />
+                      <YAxis
+                        tick={{ fontSize: 11 }}
+                        tickLine={false}
+                        axisLine={false}
+                      />
+                      <Tooltip
+                        contentStyle={{
+                          backgroundColor: "var(--card)",
+                          border: "1px solid var(--border)",
+                          borderRadius: "8px",
+                          fontSize: "13px",
+                        }}
+                        formatter={(value: number, name: string, props: { payload?: { isAnomaly: boolean } }) => {
+                          const isAnomaly = props.payload?.isAnomaly;
+                          return [`${value.toFixed(2)} ${t.kw} ${isAnomaly ? "(ANOMALY)" : ""}`, "Power"];
+                        }}
+                      />
+                      <ReferenceLine
+                        y={scadaSummary?.avg_power_kw ?? 0}
+                        stroke="var(--chart-2)"
+                        strokeDasharray="5 5"
+                        label={{ value: "SCADA avg", position: "right", fontSize: 11 }}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="powerKW"
+                        stroke="var(--chart-5)"
+                        strokeWidth={2}
+                        dot={<CustomDot />}
+                        activeDot={{ r: 4 }}
+                      />
+                    </LineChart>
+                  </ResponsiveContainer>
+                )}
+              </div>
+            </CardContent>
+          </Card>
       </div>
 
-      {/* Absorption Machine Status */}
+      {/* SCADA Status */}
       <Card className="border-border bg-card">
         <CardHeader className="pb-2">
           <CardTitle className="text-lg font-semibold">
-            {t.absorptionMachine}
+            SCADA Summary
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm text-muted-foreground">{t.measuredCoolingPower}</p>
+              <p className="text-sm text-muted-foreground">Total normalized energy</p>
               <p className="text-2xl font-bold text-foreground">
-                {currentKPIs.absorptionPuissanceMesuree} {t.kw}
+                {formatValue(scadaSummary?.total_normalized_kwh, 0)} kWh
               </p>
             </div>
             <div className="text-right">
-              <p className="text-sm text-muted-foreground">{t.nominalPower}</p>
+              <p className="text-sm text-muted-foreground">Average power</p>
               <p className="text-2xl font-bold text-muted-foreground">
-                {currentKPIs.absorptionPuissanceNominale} {t.kw}
+                {formatValue(scadaSummary?.avg_power_kw, 1)} {t.kw}
               </p>
             </div>
           </div>
@@ -233,15 +363,7 @@ export default function TrigenerationPage() {
                 {utilizationPercent}%
               </span>
             </div>
-            <div className="h-4 w-full overflow-hidden rounded-full bg-muted">
-              <div
-                className={cn(
-                  "h-full rounded-full transition-all",
-                  utilizationPercent < 50 ? "bg-warning-amber" : "bg-energy-green"
-                )}
-                style={{ width: `${utilizationPercent}%` }}
-              />
-            </div>
+            <Progress value={utilizationPercent} className="h-4" />
           </div>
         </CardContent>
       </Card>

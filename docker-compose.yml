@@ -1,40 +1,13 @@
 services:
   backend:
-    image: python:3.12-slim
-    working_dir: /app
-    env_file:
-      - .env
+    build: .
+    env_file: .env
+    restart: unless-stopped
     environment:
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONUNBUFFERED: "1"
     ports:
       - "8000:8000"
-    volumes:
-      - ./main.py:/app/main.py
-      - ./database.py:/app/database.py
-      - ./models.py:/app/models.py
-      - ./schemas.py:/app/schemas.py
-      - ./routers:/app/routers
-      - ./utils:/app/utils
-    command:
-      - sh
-      - -lc
-      - >
-        pip install --no-cache-dir
-        fastapi
-        "uvicorn[standard]"
-        sqlalchemy
-        psycopg2-binary
-        pydantic
-        python-dotenv
-        python-multipart
-        requests
-        pandas
-        openpyxl
-        xlrd
-        paho-mqtt
-        &&
-        uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
   frontend:
     image: node:22-alpine
