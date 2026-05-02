@@ -25,6 +25,26 @@ export interface DocumentsSummary {
   }>
 }
 
+export interface DocumentsCo2MonthlyItem {
+  billing_month: string
+  gas_kwh: number
+  grid_kwh: number
+  co2_gas_kg: number
+  co2_grid_kg: number
+  co2_total_kg: number
+  scada_gas_kwh: number
+  scada_co2_gas_kg: number
+}
+
+export interface DocumentsCo2MonthlyResponse {
+  factors: {
+    natural_gas: number
+    grid_electricity: number
+    self_produced: number
+  }
+  items: DocumentsCo2MonthlyItem[]
+}
+
 export interface DocumentBatchUploadItem {
   id: string | null
   filename: string
@@ -135,6 +155,12 @@ export function fetchDocuments(options?: {
 
 export function fetchDocumentsSummary() {
   return apiFetch<DocumentsSummary>('/documents/summary', {
+    cache: 'no-store',
+  })
+}
+
+export function fetchDocumentsCo2Monthly() {
+  return apiFetch<DocumentsCo2MonthlyResponse>('/documents/co2/monthly', {
     cache: 'no-store',
   })
 }

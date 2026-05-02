@@ -17,7 +17,7 @@ import pandas as pd
 import requests
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
-from sqlalchemy import func, text
+from sqlalchemy import case, func, inspect, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -30,6 +30,7 @@ from schemas import (
     DocumentsRead,
 )
 from utils.energy import (
+    CO2_FACTORS_KG_PER_KWH,
     UNIT_TO_KWH,
     estimate_co2_kg,
     normalize_gas_to_kwh,
@@ -69,6 +70,11 @@ CANONICAL_DOC_TYPES = {
 }
 METER_LIKE_DOC_TYPES = {"STEG_METER_READING", "STEG_PURCHASE_SALE_READING"}
 SUPPORTED_CO2_ENERGY_TYPES = {"electricity", "natural_gas", "fuel_oil", "coal"}
+CO2_FACTORS_53 = {
+    "natural_gas": CO2_FACTORS_KG_PER_KWH["natural_gas"],
+    "grid_electricity": CO2_FACTORS_KG_PER_KWH["electricity"],
+    "self_produced": CO2_FACTORS_KG_PER_KWH.get("self_produced", 0.0),
+}
 DOC_TYPE_TO_ENERGY_TYPE = {
     "STEG_ELECTRICITY_BILL": "electricity",
     "STEG_GAS_BILL": "natural_gas",
@@ -2409,12 +2415,38 @@ def list_documents(
 
 @router.get("/documents/summary")
 def get_documents_summary(db: Session = Depends(get_db)) -> dict[str, Any]:
-    accepted_documents = db.query(Documents).filter(Documents.review_status == "accepted")
+    accepted_documents = db.query(Documents).filter(
+        Documents.review_status == "accepted",
+        Documents.normalized_kwh.isnot(None),
+    )
+    gas_doc_types = ["STEG_GAS_BILL"]
+    grid_doc_types = [
+        "STEG_ELECTRICITY_BILL",
+        "STEG_METER_READING",
+        "STEG_PURCHASE_SALE_READING",
+    ]
+    gas_condition = Documents.doc_type.in_(gas_doc_types)
+    grid_condition = Documents.doc_type.in_(grid_doc_types)
 
     totals = (
         accepted_documents.with_entities(
             func.coalesce(func.sum(Documents.normalized_kwh), 0.0),
-            func.coalesce(func.sum(Documents.co2_emissions_kg), 0.0),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            gas_condition,
+                            Documents.normalized_kwh * CO2_FACTORS_53["natural_gas"],
+                        ),
+                        (
+                            grid_condition,
+                            Documents.normalized_kwh * CO2_FACTORS_53["grid_electricity"],
+                        ),
+                        else_=0.0,
+                    )
+                ),
+                0.0,
+            ),
         )
         .one()
     )
@@ -2423,7 +2455,22 @@ def get_documents_summary(db: Session = Depends(get_db)) -> dict[str, Any]:
         accepted_documents.with_entities(
             Documents.supplier.label("supplier"),
             func.coalesce(func.sum(Documents.normalized_kwh), 0.0).label("total_kwh"),
-            func.coalesce(func.sum(Documents.co2_emissions_kg), 0.0).label("total_co2_kg"),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            gas_condition,
+                            Documents.normalized_kwh * CO2_FACTORS_53["natural_gas"],
+                        ),
+                        (
+                            grid_condition,
+                            Documents.normalized_kwh * CO2_FACTORS_53["grid_electricity"],
+                        ),
+                        else_=0.0,
+                    )
+                ),
+                0.0,
+            ).label("total_co2_kg"),
         )
         .filter(Documents.supplier.isnot(None))
         .group_by(Documents.supplier)
@@ -2442,6 +2489,161 @@ def get_documents_summary(db: Session = Depends(get_db)) -> dict[str, Any]:
             }
             for row in by_supplier_rows
         ],
+    }
+
+
+@router.get("/documents/co2/monthly")
+def get_documents_co2_monthly(db: Session = Depends(get_db)) -> dict[str, Any]:
+    gas_doc_types = ["STEG_GAS_BILL"]
+    grid_doc_types = [
+        "STEG_ELECTRICITY_BILL",
+        "STEG_METER_READING",
+        "STEG_PURCHASE_SALE_READING",
+    ]
+    gas_condition = Documents.doc_type.in_(gas_doc_types)
+    grid_condition = Documents.doc_type.in_(grid_doc_types)
+
+    rows = (
+        db.query(
+            Documents.billing_month.label("billing_month"),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (gas_condition, Documents.normalized_kwh),
+                        else_=0.0,
+                    )
+                ),
+                0.0,
+            ).label("gas_kwh"),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (grid_condition, Documents.normalized_kwh),
+                        else_=0.0,
+                    )
+                ),
+                0.0,
+            ).label("grid_kwh"),
+        )
+        .filter(
+            Documents.review_status == "accepted",
+            Documents.billing_month.isnot(None),
+            Documents.normalized_kwh.isnot(None),
+            Documents.billing_month.op("~")("^\\d{2}/\\d{4}$"),
+        )
+        .group_by(Documents.billing_month)
+        .order_by(func.to_date(Documents.billing_month, "MM/YYYY").asc())
+        .all()
+    )
+
+    scada_by_month: dict[str, float] = {}
+    inspector = inspect(db.get_bind())
+    if "scada_ledger" in inspector.get_table_names():
+        scada_volume_rows = db.execute(
+            text(
+                """
+                WITH ordered AS (
+                    SELECT
+                        timestamp,
+                        (raw_metrics->>'gas_volume_nm3_cumul')::double precision AS gas_cumul,
+                        date_trunc('month', timestamp) AS month,
+                        lag((raw_metrics->>'gas_volume_nm3_cumul')::double precision) OVER (
+                            PARTITION BY date_trunc('month', timestamp)
+                            ORDER BY timestamp
+                        ) AS prev_cumul
+                    FROM scada_ledger
+                    WHERE raw_metrics ? 'gas_volume_nm3_cumul'
+                      AND (raw_metrics->>'gas_volume_nm3_cumul') IS NOT NULL
+                )
+                SELECT
+                    to_char(month, 'MM/YYYY') AS month,
+                    sum(
+                        CASE
+                            WHEN prev_cumul IS NULL THEN 0
+                            WHEN gas_cumul >= prev_cumul THEN gas_cumul - prev_cumul
+                            ELSE 0
+                        END
+                    ) AS gas_volume_nm3
+                FROM ordered
+                GROUP BY month
+                ORDER BY month
+                """
+            )
+        ).mappings().all()
+
+        scada_flow_rows = db.execute(
+            text(
+                """
+                WITH ordered AS (
+                    SELECT
+                        timestamp,
+                        gas_flow_nm3h,
+                        date_trunc('month', timestamp) AS month,
+                        lag(timestamp) OVER (
+                            PARTITION BY date_trunc('month', timestamp)
+                            ORDER BY timestamp
+                        ) AS prev_ts
+                    FROM scada_ledger
+                    WHERE gas_flow_nm3h IS NOT NULL
+                )
+                SELECT
+                    to_char(month, 'MM/YYYY') AS month,
+                    sum(gas_flow_nm3h * EXTRACT(EPOCH FROM (timestamp - prev_ts)) / 3600.0)
+                        AS gas_volume_nm3
+                FROM ordered
+                WHERE prev_ts IS NOT NULL
+                GROUP BY month
+                ORDER BY month
+                """
+            )
+        ).mappings().all()
+
+        for row in scada_volume_rows:
+            month = row.get("month")
+            volume = row.get("gas_volume_nm3")
+            if month and volume is not None:
+                scada_by_month[str(month)] = float(volume)
+
+        for row in scada_flow_rows:
+            month = row.get("month")
+            volume = row.get("gas_volume_nm3")
+            if month and volume is not None and str(month) not in scada_by_month:
+                scada_by_month[str(month)] = float(volume)
+
+    rows_by_month = {row.billing_month: row for row in rows}
+    months = set(rows_by_month.keys()) | set(scada_by_month.keys())
+
+    monthly = []
+    for billing_month in sorted(months, key=lambda value: datetime.strptime(value, "%m/%Y")):
+        row = rows_by_month.get(billing_month)
+        gas_kwh = float(row.gas_kwh or 0.0) if row else 0.0
+        grid_kwh = float(row.grid_kwh or 0.0) if row else 0.0
+        co2_gas_kg = gas_kwh * CO2_FACTORS_53["natural_gas"]
+        co2_grid_kg = grid_kwh * CO2_FACTORS_53["grid_electricity"]
+
+        scada_gas_kwh = 0.0
+        scada_co2_gas_kg = 0.0
+        scada_volume_nm3 = scada_by_month.get(billing_month)
+        if scada_volume_nm3 is not None:
+            scada_gas_kwh = normalize_gas_to_kwh(scada_volume_nm3, DEFAULT_PCI_FACTOR)
+            scada_co2_gas_kg = estimate_co2_kg(scada_gas_kwh, "natural_gas")
+
+        monthly.append(
+            {
+                "billing_month": billing_month,
+                "gas_kwh": gas_kwh,
+                "grid_kwh": grid_kwh,
+                "co2_gas_kg": co2_gas_kg,
+                "co2_grid_kg": co2_grid_kg,
+                "co2_total_kg": co2_gas_kg + co2_grid_kg,
+                "scada_gas_kwh": scada_gas_kwh,
+                "scada_co2_gas_kg": scada_co2_gas_kg,
+            }
+        )
+
+    return {
+        "factors": CO2_FACTORS_53,
+        "items": monthly,
     }
 
 

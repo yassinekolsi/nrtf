@@ -41,9 +41,11 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   DocumentBatchUploadResponse,
+  DocumentsCo2MonthlyResponse,
   DocumentRecord,
   DocumentsSummary,
   ReviewStatus,
+  fetchDocumentsCo2Monthly,
   fetchDocuments,
   fetchDocumentsSummary,
   getDocumentSourceUrl,
@@ -73,6 +75,17 @@ const ENERGY_TYPE_OPTIONS = [
   "coal",
   "other",
 ];
+const GAS_DOC_TYPES = new Set(["STEG_GAS_BILL"]);
+const GRID_DOC_TYPES = new Set([
+  "STEG_ELECTRICITY_BILL",
+  "STEG_METER_READING",
+  "STEG_PURCHASE_SALE_READING",
+]);
+const DEFAULT_CO2_FACTORS = {
+  natural_gas: 0.202,
+  grid_electricity: 0.5,
+  self_produced: 0,
+};
 
 type ReviewFormState = {
   docType: string;
@@ -137,6 +150,29 @@ function formatNumber(value: unknown, maximumFractionDigits = 2) {
   return new Intl.NumberFormat("fr-FR", {
     maximumFractionDigits,
   }).format(numericValue);
+}
+
+function formatFactor(value: number) {
+  return formatNumber(value, 3);
+}
+
+function getDocumentCo2Kg(
+  doc: DocumentRecord,
+  factors: DocumentsCo2MonthlyResponse["factors"]
+) {
+  if (doc.normalized_kwh == null) {
+    return null;
+  }
+
+  if (GAS_DOC_TYPES.has(doc.doc_type)) {
+    return doc.normalized_kwh * factors.natural_gas;
+  }
+
+  if (GRID_DOC_TYPES.has(doc.doc_type)) {
+    return doc.normalized_kwh * factors.grid_electricity;
+  }
+
+  return null;
 }
 
 function getRawObject(value: unknown) {
@@ -618,6 +654,11 @@ export default function DocumentsPage() {
     total_co2_kg: 0,
     by_supplier: [],
   });
+  const [co2Monthly, setCo2Monthly] = useState<DocumentsCo2MonthlyResponse>({
+    factors: DEFAULT_CO2_FACTORS,
+    items: [],
+  });
+  const [co2MonthlyError, setCo2MonthlyError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isReviewSubmitting, setIsReviewSubmitting] = useState(false);
@@ -651,6 +692,18 @@ export default function DocumentsPage() {
 
     setDocuments(documentsPayload);
     setSummary(summaryPayload);
+
+    try {
+      const monthlyPayload = await fetchDocumentsCo2Monthly();
+      setCo2Monthly(monthlyPayload);
+      setCo2MonthlyError(null);
+    } catch (error) {
+      setCo2MonthlyError(
+        error instanceof Error
+          ? error.message
+          : "Failed to load CO2 monthly data."
+      );
+    }
   }
 
   useEffect(() => {
@@ -659,6 +712,7 @@ export default function DocumentsPage() {
     async function load() {
       try {
         setErrorMessage(null);
+        setCo2MonthlyError(null);
         const [documentsPayload, summaryPayload] = await Promise.all([
           fetchDocuments(),
           fetchDocumentsSummary(),
@@ -670,6 +724,22 @@ export default function DocumentsPage() {
 
         setDocuments(documentsPayload);
         setSummary(summaryPayload);
+
+        try {
+          const monthlyPayload = await fetchDocumentsCo2Monthly();
+          if (!cancelled) {
+            setCo2Monthly(monthlyPayload);
+            setCo2MonthlyError(null);
+          }
+        } catch (error) {
+          if (!cancelled) {
+            setCo2MonthlyError(
+              error instanceof Error
+                ? error.message
+                : "Failed to load CO2 monthly data."
+            );
+          }
+        }
       } catch (error) {
         if (!cancelled) {
           setErrorMessage(
@@ -938,6 +1008,99 @@ export default function DocumentsPage() {
         <KPICard label="Accepted Docs" value={acceptedCount} />
         <KPICard label="Needs Review" value={reviewCount} />
       </div>
+
+      <Card className="border-border bg-card">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-lg font-semibold">CO₂ Factors (Section 5.3)</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-4 md:grid-cols-3">
+            <div className="rounded-lg border border-border bg-muted/20 p-4">
+              <p className="text-xs uppercase tracking-wide text-muted-foreground">Natural gas</p>
+              <p className="mt-1 text-lg font-semibold text-foreground">
+                {formatFactor(co2Monthly.factors.natural_gas)} kgCO₂/kWh
+              </p>
+            </div>
+            <div className="rounded-lg border border-border bg-muted/20 p-4">
+              <p className="text-xs uppercase tracking-wide text-muted-foreground">Grid electricity</p>
+              <p className="mt-1 text-lg font-semibold text-foreground">
+                {formatFactor(co2Monthly.factors.grid_electricity)} kgCO₂/kWh
+              </p>
+            </div>
+            <div className="rounded-lg border border-border bg-muted/20 p-4">
+              <p className="text-xs uppercase tracking-wide text-muted-foreground">Self-produced</p>
+              <p className="mt-1 text-lg font-semibold text-foreground">
+                {formatFactor(co2Monthly.factors.self_produced)} kgCO₂/kWh
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+            <p className="text-sm text-muted-foreground">
+              Invoice totals use accepted normalized documents; SCADA gas uses flow or cumulative readings when available.
+            </p>
+          </div>
+
+          {co2MonthlyError ? (
+            <div className="rounded-lg border border-alarm-red/30 bg-alarm-red/10 px-4 py-3 text-sm text-foreground">
+              {co2MonthlyError}
+            </div>
+          ) : null}
+
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="text-[15px]">Month</TableHead>
+                <TableHead className="text-right text-[15px]">Gas kWh (Invoices)</TableHead>
+                <TableHead className="text-right text-[15px]">Gas kWh (SCADA)</TableHead>
+                <TableHead className="text-right text-[15px]">Grid kWh</TableHead>
+                <TableHead className="text-right text-[15px]">CO₂ Gas (Invoices)</TableHead>
+                <TableHead className="text-right text-[15px]">CO₂ Gas (SCADA)</TableHead>
+                <TableHead className="text-right text-[15px]">CO₂ Grid (kg)</TableHead>
+                <TableHead className="text-right text-[15px]">CO₂ Total (Invoices)</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {co2Monthly.items.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={8} className="py-8 text-center text-sm text-muted-foreground">
+                    No monthly CO₂ aggregates yet.
+                  </TableCell>
+                </TableRow>
+              ) : (
+                co2Monthly.items.map((item) => (
+                  <TableRow key={item.billing_month}>
+                    <TableCell className="text-[15px] font-medium">
+                      {item.billing_month}
+                    </TableCell>
+                    <TableCell className="text-right text-[15px]">
+                      {formatNumber(item.gas_kwh)}
+                    </TableCell>
+                    <TableCell className="text-right text-[15px]">
+                      {formatNumber(item.scada_gas_kwh)}
+                    </TableCell>
+                    <TableCell className="text-right text-[15px]">
+                      {formatNumber(item.grid_kwh)}
+                    </TableCell>
+                    <TableCell className="text-right text-[15px]">
+                      {formatNumber(item.co2_gas_kg)}
+                    </TableCell>
+                    <TableCell className="text-right text-[15px]">
+                      {formatNumber(item.scada_co2_gas_kg)}
+                    </TableCell>
+                    <TableCell className="text-right text-[15px]">
+                      {formatNumber(item.co2_grid_kg)}
+                    </TableCell>
+                    <TableCell className="text-right text-[15px] font-medium">
+                      {formatNumber(item.co2_total_kg)}
+                    </TableCell>
+                  </TableRow>
+                ))
+              )}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
 
       <Card className="border-border bg-card">
         <CardHeader className="pb-2">
@@ -1437,7 +1600,7 @@ export default function DocumentsPage() {
                       {formatNumber(doc.normalized_kwh)}
                     </TableCell>
                     <TableCell className="text-right text-[15px]">
-                      {formatNumber(doc.co2_emissions_kg)}
+                      {formatNumber(getDocumentCo2Kg(doc, co2Monthly.factors))}
                     </TableCell>
                   </TableRow>
                 ))
