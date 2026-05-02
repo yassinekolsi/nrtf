@@ -46,10 +46,18 @@ export interface DocumentReviewPayload {
   supplier?: string | null
   billing_month?: string | null
   document_date?: string | null
+  invoice_number?: string | null
+  reference_number?: string | null
+  site_name?: string | null
+  client_name?: string | null
   energy_type?: string | null
   raw_value?: number | string | null
   raw_unit?: string | null
   pci_factor?: number | string | null
+  amount_ttc?: number | string | null
+  index_ancien?: number | string | null
+  index_nouveau?: number | string | null
+  subscribed_power?: number | string | null
 }
 
 const API_BASE_URL =
@@ -101,6 +109,10 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function getDocumentsApiBaseUrl() {
   return API_BASE_URL
+}
+
+export function getDocumentSourceUrl(id: string) {
+  return `${API_BASE_URL}/documents/${id}/source`
 }
 
 export function fetchDocuments(options?: {

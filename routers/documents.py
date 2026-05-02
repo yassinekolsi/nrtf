@@ -5,15 +5,18 @@ import json
 import mimetypes
 import os
 import re
+import time
 import unicodedata
 from datetime import datetime
 from io import BytesIO
+from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pandas as pd
 import requests
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy import func, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -46,8 +49,14 @@ GEMINI_URL = (
     f"{GEMINI_MODEL}:generateContent"
 )
 GEMINI_TIMEOUT_SECONDS = float(os.getenv("GEMINI_TIMEOUT_SECONDS", "45"))
+GEMINI_MAX_RETRIES = max(0, int(os.getenv("GEMINI_MAX_RETRIES", "2")))
+GEMINI_RETRY_BACKOFF_SECONDS = float(os.getenv("GEMINI_RETRY_BACKOFF_SECONDS", "8"))
+GEMINI_MAX_RETRY_WAIT_SECONDS = float(os.getenv("GEMINI_MAX_RETRY_WAIT_SECONDS", "65"))
 DEFAULT_PCI_FACTOR = 9.082
 REVIEW_THRESHOLD = 80.0
+BASE_DIR = Path(__file__).resolve().parent.parent
+DATA_ROOT = BASE_DIR / "data"
+UPLOADS_DIR = DATA_ROOT / "uploads"
 
 REVIEW_STATUSES = {"processing", "accepted", "requires_review", "failed"}
 CANONICAL_DOC_TYPES = {
@@ -55,14 +64,17 @@ CANONICAL_DOC_TYPES = {
     "STEG_GAS_BILL",
     "SONEDE_WATER_BILL",
     "STEG_METER_READING",
+    "STEG_PURCHASE_SALE_READING",
     "OTHER",
 }
+METER_LIKE_DOC_TYPES = {"STEG_METER_READING", "STEG_PURCHASE_SALE_READING"}
 SUPPORTED_CO2_ENERGY_TYPES = {"electricity", "natural_gas", "fuel_oil", "coal"}
 DOC_TYPE_TO_ENERGY_TYPE = {
     "STEG_ELECTRICITY_BILL": "electricity",
     "STEG_GAS_BILL": "natural_gas",
     "SONEDE_WATER_BILL": "water",
     "STEG_METER_READING": "electricity",
+    "STEG_PURCHASE_SALE_READING": "electricity",
     "OTHER": "other",
 }
 CANONICAL_FIELDS = (
@@ -207,6 +219,64 @@ MONTH_NAME_TO_NUMBER = {
     "december": 12,
 }
 
+METER_CODE_TO_LABEL = {
+    "1.8.3": "Jour",
+    "1.8.2": "Pointe",
+    "1.8.1": "Nuit",
+    "1.8.4": "Soire",
+    "5.8.0": "Reactive",
+    "1.6.3": "I Max J",
+    "1.6.2": "I Max P",
+    "1.6.4": "I Max S",
+    "2.8.3": "Jour",
+    "2.8.2": "Pointe",
+    "2.8.1": "Nuit",
+    "2.8.4": "Soire",
+    "6.8.3": "QII Jour",
+    "6.8.2": "QII Pointe",
+    "6.8.1": "QII Nuit",
+    "6.8.4": "QII Soire",
+}
+METER_REGISTER_ROW_DEFAULTS = {
+    "STEG": [
+        ("Jour", "1.8.3"),
+        ("Pointe", "1.8.2"),
+        ("Nuit", "1.8.1"),
+        ("Soire", "1.8.4"),
+        ("Reactive", "5.8.0"),
+        ("I Max J", "1.6.3"),
+        ("I Max P", "1.6.2"),
+        ("I Max S", "1.6.4"),
+    ],
+    "Injection": [
+        ("Jour", "2.8.3"),
+        ("Pointe", "2.8.2"),
+        ("Nuit", "2.8.1"),
+        ("Soire", "2.8.4"),
+        ("QII Jour", "6.8.3"),
+        ("QII Pointe", "6.8.2"),
+        ("QII Nuit", "6.8.1"),
+        ("QII Soire", "6.8.4"),
+    ],
+    "Redressee": [
+        ("Jour", "2.8.3"),
+        ("Pointe", "2.8.2"),
+        ("Nuit", "2.8.1"),
+        ("Soire", "2.8.4"),
+        ("QII Jour", "6.8.3"),
+        ("QII Pointe", "6.8.2"),
+        ("QII Nuit", "6.8.1"),
+        ("QII Soire", "6.8.4"),
+    ],
+    "Production": [("Produite", None)],
+}
+METER_SECTION_TITLES = {
+    "consumption": "Consumption Side",
+    "injection": "Injection Side",
+    "production": "Production Side",
+    "other": "Other",
+}
+
 SYSTEM_PROMPT = """You are a strict OCR extraction API for industrial energy documents.
 
 The uploaded document can be:
@@ -214,11 +284,12 @@ The uploaded document can be:
 - a STEG gas bill
 - a SONEDE water bill
 - a STEG meter-reading sheet such as FICHE RELEVE ENERGIE ACHAT ET VENTE
+- a STEG cogeneration purchase/sale reading sheet
 - or another industrial utility document in French, Arabic, or English
 
 Return ONLY a raw JSON object using this schema:
 {
-  "doc_type": "STEG_ELECTRICITY_BILL | STEG_GAS_BILL | SONEDE_WATER_BILL | STEG_METER_READING | OTHER",
+  "doc_type": "STEG_ELECTRICITY_BILL | STEG_GAS_BILL | SONEDE_WATER_BILL | STEG_METER_READING | STEG_PURCHASE_SALE_READING | OTHER",
   "supplier": "string or null",
   "invoice_number": "string or null",
   "reference_number": "string or null",
@@ -256,7 +327,33 @@ Rules:
 - billing_month must be MM/YYYY when a month/year is visible.
 - For electricity bills, prefer the main energy quantity in kWh for raw_value/raw_unit.
 - For gas bills, prefer the gas volume and its unit for raw_value/raw_unit.
-- For meter-reading sheets, keep register tables inside doc_specific.register_rows.
+- For meter-reading sheets, do not force invoice-like values. If there is no single trustworthy aggregate quantity, keep raw_value null.
+- For meter-reading sheets, keep register tables inside doc_specific.registers as an array of grouped tables:
+  {
+    "registers": [
+      {
+        "register_label": "STEG | Injection | Redressee | Production | other label",
+        "side": "consumption | injection | production | other | null",
+        "register_role": "grid_consumption | injection_principal | injection_redressee | production_ctr | other | null",
+        "register_id": "string or null",
+        "reading_name": "string or null",
+        "rows": [
+          {
+            "label": "Jour | Pointe | Nuit | Soire | Reactive | QII Jour | ...",
+            "code": "OBIS code string or null",
+            "ancien": "number or null",
+            "nouveau": "number or null",
+            "delta": "number or null"
+          }
+        ]
+      }
+    ]
+  }
+- When several side-by-side register tables exist on the same page, return them as separate register objects, not as a single merged list.
+- For cogeneration purchase/sale sheets, keep these distinct when visible: STEG consumption side, injection principal CTR, injection redressee/redundant CTR, and production CTR.
+- Preserve visible register IDs such as CTR numbers whenever they are readable.
+- For FICHE RELEVE ENERGIE ACHAT ET VENTE documents with both purchase and sale/injection registers, classify as STEG_PURCHASE_SALE_READING.
+- Use STEG_METER_READING only for simpler register sheets that are not the cogeneration purchase/sale form.
 - If the document is not clearly one of the supported types, set doc_type to OTHER.
 """
 
@@ -344,6 +441,67 @@ def _detect_mime_type(filename: str | None, content_type: str | None) -> str:
         return guessed_type
 
     return "application/octet-stream"
+
+
+def _is_path_within_root(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _slugify_filename(value: str) -> str:
+    normalized = _strip_accents(value).lower()
+    normalized = re.sub(r"[^a-z0-9]+", "-", normalized).strip("-")
+    return normalized or "document"
+
+
+def _store_source_file(
+    file_bytes: bytes,
+    filename: str,
+    content_type: str | None,
+) -> dict[str, Any]:
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    original_path = Path(filename)
+    extension = "".join(original_path.suffixes).lower()
+    safe_stem = _slugify_filename(original_path.stem)[:80]
+    stored_name = f"{safe_stem}-{uuid4().hex}{extension}"
+    stored_path = UPLOADS_DIR / stored_name
+    stored_path.write_bytes(file_bytes)
+
+    return {
+        "source_filename": original_path.name,
+        "source_storage_path": str(stored_path),
+        "source_content_type": _detect_mime_type(original_path.name, content_type),
+        "source_size_bytes": len(file_bytes),
+    }
+
+
+def _guess_media_type_from_filename(filename: str | None) -> str | None:
+    if not filename:
+        return None
+    guessed_type, _ = mimetypes.guess_type(filename)
+    return guessed_type
+
+
+def _resolve_document_source_path(document: Documents) -> tuple[Path | None, str | None]:
+    raw_json = document.raw_json if isinstance(document.raw_json, dict) else {}
+    stored_path_value = raw_json.get("source_storage_path")
+    source_content_type = _clean_text_value(raw_json.get("source_content_type"))
+
+    if isinstance(stored_path_value, str):
+        stored_path = Path(stored_path_value)
+        if stored_path.exists() and _is_path_within_root(stored_path, DATA_ROOT):
+            return stored_path, source_content_type or _guess_media_type_from_filename(stored_path.name)
+
+    if document.filename:
+        matches = [path for path in DATA_ROOT.rglob(document.filename) if path.is_file()]
+        if matches:
+            matched_path = matches[0]
+            return matched_path, source_content_type or _guess_media_type_from_filename(matched_path.name)
+
+    return None, source_content_type
 
 
 def _parse_year_fragment(value: str) -> int:
@@ -440,6 +598,13 @@ def _normalize_doc_type(value: Any) -> str | None:
         return "STEG_GAS_BILL"
     if normalized == "SONEDE_WATER":
         return "SONEDE_WATER_BILL"
+    if (
+        "ACHAT_ET_VENTE" in normalized
+        or "PURCHASE" in normalized
+        or "SALE" in normalized
+        or "COGENERATION" in normalized
+    ):
+        return "STEG_PURCHASE_SALE_READING"
     if "RELEVE" in normalized or "METER" in normalized or "CTR" in normalized:
         return "STEG_METER_READING"
     if "SONEDE" in normalized or "WATER" in normalized:
@@ -515,6 +680,14 @@ def _is_gas_volume_unit(raw_unit: str | None, *, energy_type: str | None, doc_ty
     return False
 
 
+def _is_supported_water_unit(raw_unit: str | None, *, energy_type: str | None, doc_type: str | None) -> bool:
+    if raw_unit is None:
+        return False
+
+    normalized = raw_unit.strip().lower().replace("³", "3")
+    return normalized == "m3" and (energy_type == "water" or doc_type == "SONEDE_WATER_BILL")
+
+
 def _normalization_factor_used(raw_unit: str | None) -> float | None:
     if raw_unit is None:
         return None
@@ -537,19 +710,52 @@ def _normalize_energy_value(
     return normalize_to_kwh(raw_value, raw_unit)
 
 
+def _supports_accept_without_energy_metrics(
+    *,
+    energy_type: str | None,
+    doc_type: str | None,
+    raw_unit: str | None,
+    doc_specific: dict[str, Any] | None = None,
+) -> bool:
+    if _is_meter_like_doc_type(doc_type):
+        return _doc_specific_has_meter_registers(doc_specific or {})
+    return _is_supported_water_unit(raw_unit, energy_type=energy_type, doc_type=doc_type)
+
+
+def _extract_retry_delay_seconds(raw_text: str) -> float | None:
+    match = re.search(r"retry in\s+([0-9]+(?:\.[0-9]+)?)s", raw_text, flags=re.IGNORECASE)
+    if not match:
+        return None
+
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
 def _extract_json_object(raw_text: str) -> dict[str, Any]:
     text_value = raw_text.strip()
     if not text_value:
         raise ValueError("Gemini returned an empty OCR response.")
 
+    decoder = json.JSONDecoder()
+    for start_index, character in enumerate(text_value):
+        if character != "{":
+            continue
+        try:
+            parsed, _ = decoder.raw_decode(text_value[start_index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+
     match = re.search(r"\{[\s\S]*\}", text_value)
-    json_text = match.group(0) if match else text_value
-    parsed = json.loads(json_text)
+    if match:
+        parsed = json.loads(match.group(0))
+        if isinstance(parsed, dict):
+            return parsed
 
-    if not isinstance(parsed, dict):
-        raise ValueError("Gemini OCR response was not a JSON object.")
-
-    return parsed
+    raise ValueError("Gemini OCR response was not a JSON object.")
 
 
 def _normalize_field_confidences(value: Any) -> dict[str, float]:
@@ -573,6 +779,520 @@ def _coerce_doc_specific(value: Any) -> dict[str, Any]:
     if isinstance(value, list):
         return {"items": value}
     return {}
+
+
+def _first_present_mapping_value(mapping: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in mapping:
+            return mapping.get(key)
+    return None
+
+
+def _normalize_meter_register_name(value: Any) -> str | None:
+    text_value = _clean_text_value(value)
+    if text_value is None:
+        return None
+
+    normalized = _strip_accents(text_value).lower()
+    if "redress" in normalized or "redresse" in normalized or "redond" in normalized:
+        return "Redressee"
+    if "steg" in normalized:
+        return "STEG"
+    if "inject" in normalized:
+        return "Injection"
+    if "produc" in normalized or "produit" in normalized:
+        return "Production"
+    return text_value
+
+
+def _normalize_meter_row_label(value: Any, *, code: str | None = None) -> str | None:
+    if code and code in METER_CODE_TO_LABEL:
+        fallback_label = METER_CODE_TO_LABEL[code]
+    else:
+        fallback_label = None
+
+    text_value = _clean_text_value(value)
+    if text_value is None:
+        return fallback_label
+
+    normalized = _strip_accents(text_value).lower()
+    alias_map = {
+        "jour": "Jour",
+        "pointe": "Pointe",
+        "nuit": "Nuit",
+        "soire": "Soire",
+        "reactive": "Reactive",
+        "qii jour": "QII Jour",
+        "qii pointe": "QII Pointe",
+        "qii nuit": "QII Nuit",
+        "qii soire": "QII Soire",
+        "i max j": "I Max J",
+        "i max p": "I Max P",
+        "i max s": "I Max S",
+        "max j": "I Max J",
+        "max p": "I Max P",
+        "max s": "I Max S",
+        "produite": "Produite",
+        "production": "Produite",
+    }
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return alias_map.get(normalized, text_value)
+
+
+def _normalize_meter_code(value: Any) -> str | None:
+    text_value = _clean_text_value(value)
+    if text_value is None:
+        return None
+
+    normalized = text_value.replace(",", ".").replace(" ", "")
+    if re.fullmatch(r"\d+\.\d+\.\d+", normalized):
+        return normalized
+    return text_value
+
+
+def _normalize_meter_reading_name(value: Any) -> str | None:
+    text_value = _clean_text_value(value)
+    if text_value is None:
+        return None
+
+    normalized = _strip_accents(text_value).lower()
+    if "redond" in normalized or "redress" in normalized or "redresse" in normalized:
+        if "(" in text_value and ")" in text_value:
+            return re.sub(r"\([^)]*\)", "(Redressee)", text_value)
+        return f"{text_value} (Redressee)"
+    return text_value
+
+
+def _infer_meter_register_context(
+    *,
+    register_label: str | None,
+    reading_name: str | None,
+) -> dict[str, str | None]:
+    normalized_label = _normalize_meter_register_name(register_label)
+    normalized_reading_label = _normalize_meter_register_name(reading_name)
+    effective_label = normalized_reading_label or normalized_label
+    normalized_reading = _strip_accents(reading_name).lower() if reading_name else ""
+
+    if effective_label == "STEG":
+        return {
+            "side": "consumption",
+            "register_role": "grid_consumption",
+            "flow_direction": "import",
+        }
+    if effective_label == "Production":
+        return {
+            "side": "production",
+            "register_role": "production_ctr",
+            "flow_direction": "produced",
+        }
+    if effective_label == "Redressee":
+        return {
+            "side": "injection",
+            "register_role": "injection_redressee",
+            "flow_direction": "export",
+        }
+    if effective_label == "Injection":
+        register_role = "injection_principal" if "principal" in normalized_reading else "injection_other"
+        return {
+            "side": "injection",
+            "register_role": register_role,
+            "flow_direction": "export",
+        }
+
+    return {
+        "side": "other",
+        "register_role": "other",
+        "flow_direction": None,
+    }
+
+
+def _infer_meter_tariff_period(label: str | None) -> str | None:
+    if label is None:
+        return None
+
+    normalized = _strip_accents(label).lower()
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if "jour" in normalized:
+        return "jour"
+    if "pointe" in normalized:
+        return "pointe"
+    if "nuit" in normalized:
+        return "nuit"
+    if "soire" in normalized:
+        return "soire"
+    return None
+
+
+def _infer_meter_row_semantics(
+    *,
+    register_label: str | None,
+    reading_name: str | None,
+    label: str | None,
+    code: str | None,
+) -> dict[str, Any]:
+    context = _infer_meter_register_context(register_label=register_label, reading_name=reading_name)
+    normalized_label = _strip_accents(label).lower() if label else ""
+    normalized_code = code or ""
+
+    quantity_type = "unknown"
+    unit = None
+    is_energy = False
+    is_active_energy = False
+    is_reactive_energy = False
+
+    if normalized_code.startswith("1.6.") or "i max" in normalized_label or normalized_label.startswith("max "):
+        quantity_type = "demand"
+        unit = "kVA"
+    elif (
+        normalized_code.startswith("5.8.")
+        or normalized_code.startswith("6.8.")
+        or "react" in normalized_label
+        or normalized_label.startswith("qii ")
+    ):
+        quantity_type = "reactive_energy"
+        unit = "kvarh"
+        is_energy = True
+        is_reactive_energy = True
+    elif (
+        normalized_code.startswith("1.8.")
+        or normalized_code.startswith("2.8.")
+        or normalized_label == "produite"
+        or context["side"] == "production"
+    ):
+        quantity_type = "active_energy"
+        unit = "kWh"
+        is_energy = True
+        is_active_energy = True
+
+    return {
+        "side": context["side"],
+        "register_role": context["register_role"],
+        "flow_direction": context["flow_direction"],
+        "tariff_period": _infer_meter_tariff_period(label),
+        "quantity_type": quantity_type,
+        "unit": unit,
+        "is_energy": is_energy,
+        "is_active_energy": is_active_energy,
+        "is_reactive_energy": is_reactive_energy,
+    }
+
+
+def _default_meter_row(register_label: str | None, position: int) -> tuple[str | None, str | None]:
+    if register_label is None:
+        return None, None
+
+    defaults = METER_REGISTER_ROW_DEFAULTS.get(register_label)
+    if defaults is None or position < 0 or position >= len(defaults):
+        return None, None
+
+    return defaults[position]
+
+
+def _normalize_meter_row(
+    value: Any,
+    *,
+    register_label: str | None,
+    register_id: str | None,
+    reading_name: str | None,
+    position: int,
+) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+
+    code = _normalize_meter_code(
+        _first_present_mapping_value(value, "code", "obis", "obis_code", "code_obis")
+    )
+    default_label, default_code = _default_meter_row(register_label, position)
+    if code is None:
+        code = default_code
+
+    label = _normalize_meter_row_label(
+        _first_present_mapping_value(value, "label", "name", "libelle"),
+        code=code,
+    )
+    if label is None:
+        label = default_label
+
+    ancien = _parse_numeric_value(_first_present_mapping_value(value, "ancien", "old", "index_ancien", "previous"))
+    nouveau = _parse_numeric_value(_first_present_mapping_value(value, "nouveau", "new", "index_nouveau", "current"))
+
+    if label is None and code is None and ancien is None and nouveau is None:
+        return None
+
+    delta = None
+    if ancien is not None and nouveau is not None:
+        delta = nouveau - ancien
+
+    semantics = _infer_meter_row_semantics(
+        register_label=register_label,
+        reading_name=reading_name,
+        label=label,
+        code=code,
+    )
+
+    row_payload: dict[str, Any] = {
+        "register": register_label,
+        "register_id": register_id,
+        "reading_name": reading_name,
+        "label": label,
+        "code": code,
+        "ancien": ancien,
+        "nouveau": nouveau,
+        **semantics,
+    }
+    if delta is not None:
+        row_payload["delta"] = delta
+
+    return row_payload
+
+
+def _normalize_meter_register(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+
+    register_label_source = (
+        _first_present_mapping_value(value, "register_label", "register", "label", "name", "type")
+    )
+    register_label = _normalize_meter_register_name(register_label_source)
+    reading_name = _normalize_meter_reading_name(
+        _first_present_mapping_value(value, "reading_name", "reading", "description", "type")
+    )
+    reading_name_register_label = _normalize_meter_register_name(reading_name)
+    if reading_name_register_label == "Redressee":
+        register_label = "Redressee"
+    register_id = _clean_text_value(
+        _first_present_mapping_value(value, "register_id", "ctr", "meter_id", "numero_ctr", "number")
+    )
+    register_context = _infer_meter_register_context(register_label=register_label, reading_name=reading_name)
+
+    rows_source = value.get("rows") or value.get("register_rows") or value.get("items")
+    if not isinstance(rows_source, list):
+        rows_source = []
+
+    rows: list[dict[str, Any]] = []
+    for row_index, row_value in enumerate(rows_source):
+        normalized_row = _normalize_meter_row(
+            row_value,
+            register_label=register_label,
+            register_id=register_id,
+            reading_name=reading_name,
+            position=row_index,
+        )
+        if normalized_row is not None:
+            rows.append(normalized_row)
+
+    if not rows:
+        return None
+
+    active_energy_delta_total = sum(
+        row["delta"]
+        for row in rows
+        if row.get("quantity_type") == "active_energy" and isinstance(row.get("delta"), (int, float))
+    )
+    reactive_energy_delta_total = sum(
+        row["delta"]
+        for row in rows
+        if row.get("quantity_type") == "reactive_energy" and isinstance(row.get("delta"), (int, float))
+    )
+    demand_row_count = sum(1 for row in rows if row.get("quantity_type") == "demand")
+
+    return {
+        "register_label": register_label or reading_name or "Register",
+        "register_id": register_id,
+        "reading_name": reading_name,
+        "side": register_context["side"],
+        "register_role": register_context["register_role"],
+        "flow_direction": register_context["flow_direction"],
+        "summary": {
+            "row_count": len(rows),
+            "active_energy_row_count": sum(1 for row in rows if row.get("quantity_type") == "active_energy"),
+            "reactive_energy_row_count": sum(1 for row in rows if row.get("quantity_type") == "reactive_energy"),
+            "demand_row_count": demand_row_count,
+            "active_energy_delta_total": active_energy_delta_total,
+            "reactive_energy_delta_total": reactive_energy_delta_total,
+        },
+        "rows": rows,
+    }
+
+
+def _group_flat_meter_rows(values: list[Any]) -> list[dict[str, Any]]:
+    registers: list[dict[str, Any]] = []
+    grouped_by_key: dict[tuple[str, str | None, str | None], dict[str, Any]] = {}
+
+    for row_value in values:
+        if not isinstance(row_value, dict):
+            continue
+
+        register_label = _normalize_meter_register_name(
+            _first_present_mapping_value(row_value, "register_label", "register", "type")
+        )
+        reading_name = _normalize_meter_reading_name(_first_present_mapping_value(row_value, "reading_name", "reading"))
+        register_id = _clean_text_value(_first_present_mapping_value(row_value, "register_id", "ctr"))
+        if _normalize_meter_register_name(reading_name) == "Redressee":
+            register_label = "Redressee"
+        key = (register_label or "Register", register_id, reading_name)
+
+        group = grouped_by_key.get(key)
+        if group is None:
+            group = {
+                "register_label": register_label or "Register",
+                "register_id": register_id,
+                "reading_name": reading_name,
+                "rows": [],
+            }
+            grouped_by_key[key] = group
+            registers.append(group)
+
+        normalized_row = _normalize_meter_row(
+            row_value,
+            register_label=group["register_label"],
+            register_id=group["register_id"],
+            reading_name=group["reading_name"],
+            position=len(group["rows"]),
+        )
+        if normalized_row is not None:
+            group["rows"].append(normalized_row)
+
+    return [register for register in registers if register["rows"]]
+
+
+def _normalize_meter_doc_specific(value: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(value)
+    grouped_source = None
+    for key in ("registers", "register_groups", "meter_registers"):
+        candidate = normalized.get(key)
+        if isinstance(candidate, list):
+            grouped_source = candidate
+            break
+
+    registers: list[dict[str, Any]] = []
+    if grouped_source is not None:
+        for register_value in grouped_source:
+            normalized_register = _normalize_meter_register(register_value)
+            if normalized_register is not None:
+                registers.append(normalized_register)
+
+    if not registers:
+        flat_rows = normalized.get("register_rows")
+        if isinstance(flat_rows, list):
+            registers = _group_flat_meter_rows(flat_rows)
+
+    if not registers:
+        return normalized
+
+    flat_rows: list[dict[str, Any]] = []
+    for register in registers:
+        register_label = register.get("register_label")
+        register_id = register.get("register_id")
+        reading_name = register.get("reading_name")
+        rows = register.get("rows")
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            flat_row = dict(row)
+            flat_row["register"] = register_label
+            flat_row["register_id"] = register_id
+            flat_row["reading_name"] = reading_name
+            flat_rows.append(flat_row)
+
+    normalized["registers"] = registers
+    normalized["register_rows"] = flat_rows
+    sections: dict[str, dict[str, Any]] = {}
+    for section_side in ("consumption", "injection", "production", "other"):
+        section_registers = [
+            register for register in registers if register.get("side") == section_side
+        ]
+        if not section_registers:
+            continue
+
+        sections[section_side] = {
+            "side": section_side,
+            "title": METER_SECTION_TITLES.get(section_side, section_side.title()),
+            "register_count": len(section_registers),
+            "registers": section_registers,
+            "register_ids": [
+                register["register_id"]
+                for register in section_registers
+                if isinstance(register.get("register_id"), str)
+            ],
+            "register_roles": [
+                register["register_role"]
+                for register in section_registers
+                if isinstance(register.get("register_role"), str)
+            ],
+        }
+
+    structure = {
+        "consumption_side": sections.get("consumption"),
+        "injection_side": sections.get("injection"),
+        "production_side": sections.get("production"),
+    }
+    structure = {key: value for key, value in structure.items() if value is not None}
+
+    active_energy_rows = [
+        row for row in flat_rows if row.get("quantity_type") == "active_energy"
+    ]
+    reactive_energy_rows = [
+        row for row in flat_rows if row.get("quantity_type") == "reactive_energy"
+    ]
+    demand_rows = [row for row in flat_rows if row.get("quantity_type") == "demand"]
+    normalized["summary"] = {
+        "register_count": len(registers),
+        "row_count": len(flat_rows),
+        "has_multiple_registers": len(registers) > 1,
+        "active_energy_row_count": len(active_energy_rows),
+        "reactive_energy_row_count": len(reactive_energy_rows),
+        "demand_row_count": len(demand_rows),
+    }
+    normalized["sections"] = sections
+    normalized["structure"] = structure
+    return normalized
+
+
+def _doc_specific_has_meter_registers(value: dict[str, Any]) -> bool:
+    registers = value.get("registers")
+    if isinstance(registers, list):
+        for register in registers:
+            if isinstance(register, dict) and isinstance(register.get("rows"), list) and register["rows"]:
+                return True
+
+    register_rows = value.get("register_rows")
+    return isinstance(register_rows, list) and any(isinstance(row, dict) for row in register_rows)
+
+
+def _is_meter_like_doc_type(doc_type: str | None) -> bool:
+    return doc_type in METER_LIKE_DOC_TYPES
+
+
+def _is_purchase_sale_doc_specific(value: dict[str, Any]) -> bool:
+    registers = value.get("registers")
+    if not isinstance(registers, list):
+        return False
+
+    labels = {
+        _normalize_meter_register_name(register.get("register_label"))
+        for register in registers
+        if isinstance(register, dict)
+    }
+    labels.discard(None)
+
+    has_grid_side = "STEG" in labels
+    has_cogen_side = bool({"Injection", "Redressee", "Production"} & labels)
+    return has_grid_side and has_cogen_side
+
+
+def _unique_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique_values: list[str] = []
+    for value in values:
+        normalized = value.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        unique_values.append(normalized)
+    return unique_values
 
 
 def _first_present_value(parsed: dict[str, Any], field_name: str) -> Any:
@@ -631,12 +1351,18 @@ def _normalize_ocr_payload(parsed: dict[str, Any]) -> dict[str, Any]:
         parsed.get("classification_confidence") or parsed.get("classificationConfidence")
     )
 
+    doc_specific = _coerce_doc_specific(parsed.get("doc_specific"))
+    for top_level_key in ("registers", "register_groups", "meter_registers", "register_rows"):
+        if top_level_key in parsed and top_level_key not in doc_specific:
+            doc_specific[top_level_key] = parsed.get(top_level_key)
+    doc_specific = _normalize_meter_doc_specific(doc_specific)
+
     return {
         "canonical": canonical,
         "raw_extracted": canonical.copy(),
         "field_confidences": field_confidences,
         "warnings": normalized_warnings,
-        "doc_specific": _coerce_doc_specific(parsed.get("doc_specific")),
+        "doc_specific": doc_specific,
         "ocr_confidence": float(ocr_confidence or 0.0),
         "readability_confidence": float(readability_confidence or ocr_confidence or 0.0),
         "classification_confidence": float(classification_confidence or 0.0),
@@ -682,21 +1408,54 @@ def run_gemini_ocr(
         },
     }
 
-    try:
-        response = requests.post(
-            GEMINI_URL,
-            headers={
-                "Content-Type": "application/json",
-                "x-goog-api-key": GEMINI_API_KEY,
-            },
-            json=payload,
-            timeout=GEMINI_TIMEOUT_SECONDS,
-        )
-    except requests.RequestException as exc:
-        return _gemini_stub(f"Gemini OCR request failed: {exc}")
+    response: requests.Response | None = None
+    request_headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": GEMINI_API_KEY,
+    }
+    for attempt in range(GEMINI_MAX_RETRIES + 1):
+        try:
+            response = requests.post(
+                GEMINI_URL,
+                headers=request_headers,
+                json=payload,
+                timeout=GEMINI_TIMEOUT_SECONDS,
+            )
+        except requests.RequestException as exc:
+            if attempt >= GEMINI_MAX_RETRIES:
+                return _gemini_stub(f"Gemini OCR request failed: {exc}")
 
-    if not response.ok:
+            retry_delay_seconds = min(
+                GEMINI_MAX_RETRY_WAIT_SECONDS,
+                GEMINI_RETRY_BACKOFF_SECONDS * (attempt + 1),
+            )
+            time.sleep(retry_delay_seconds)
+            continue
+
+        if response.ok:
+            break
+
+        if response.status_code == 429 and attempt < GEMINI_MAX_RETRIES:
+            retry_delay_seconds = _extract_retry_delay_seconds(response.text) or (
+                GEMINI_RETRY_BACKOFF_SECONDS * (attempt + 1)
+            )
+            time.sleep(min(GEMINI_MAX_RETRY_WAIT_SECONDS, retry_delay_seconds))
+            continue
+
+        if response.status_code >= 500 and attempt < GEMINI_MAX_RETRIES:
+            retry_delay_seconds = min(
+                GEMINI_MAX_RETRY_WAIT_SECONDS,
+                GEMINI_RETRY_BACKOFF_SECONDS * (attempt + 1),
+            )
+            time.sleep(retry_delay_seconds)
+            continue
+
         return _gemini_stub(f"Gemini OCR HTTP {response.status_code}: {response.text[:500]}")
+
+    if response is None or not response.ok:
+        status_code = response.status_code if response is not None else "unknown"
+        response_text = response.text[:500] if response is not None else ""
+        return _gemini_stub(f"Gemini OCR HTTP {status_code}: {response_text}")
 
     try:
         data = response.json()
@@ -769,6 +1528,8 @@ def _build_hints(
 def _resolve_doc_type(canonical: dict[str, Any], hints: dict[str, Any], doc_specific: dict[str, Any]) -> str:
     doc_type = _normalize_doc_type(canonical.get("doc_type")) or _normalize_doc_type(hints.get("doc_type"))
     if doc_type:
+        if doc_type == "STEG_METER_READING" and _is_purchase_sale_doc_specific(doc_specific):
+            return "STEG_PURCHASE_SALE_READING"
         return doc_type
 
     supplier = _normalize_supplier(canonical.get("supplier")) or _normalize_supplier(hints.get("supplier"))
@@ -777,7 +1538,9 @@ def _resolve_doc_type(canonical: dict[str, Any], hints: dict[str, Any], doc_spec
     )
     raw_unit = _normalize_unit(canonical.get("raw_unit")) or _normalize_unit(hints.get("raw_unit"))
 
-    if doc_specific.get("register_rows"):
+    if _is_purchase_sale_doc_specific(doc_specific):
+        return "STEG_PURCHASE_SALE_READING"
+    if _doc_specific_has_meter_registers(doc_specific):
         return "STEG_METER_READING"
     if supplier == "SONEDE" or energy_type == "water":
         return "SONEDE_WATER_BILL"
@@ -851,7 +1614,7 @@ def _resolve_raw_unit(canonical: dict[str, Any], hints: dict[str, Any], *, doc_t
     if raw_unit:
         return raw_unit
 
-    if doc_type in {"STEG_ELECTRICITY_BILL", "STEG_METER_READING"} and _parse_numeric_value(
+    if doc_type in {"STEG_ELECTRICITY_BILL", "STEG_METER_READING", "STEG_PURCHASE_SALE_READING"} and _parse_numeric_value(
         canonical.get("raw_value")
     ) is not None:
         return "kWh"
@@ -880,7 +1643,7 @@ def _build_document_state(
     canonical = {field: base_canonical.get(field) for field in CANONICAL_FIELDS}
     field_confidences = dict(ocr_payload.get("field_confidences") or {})
     warnings = list(ocr_payload.get("warnings") or [])
-    doc_specific = dict(ocr_payload.get("doc_specific") or {})
+    doc_specific = _normalize_meter_doc_specific(dict(ocr_payload.get("doc_specific") or {}))
 
     used_hints = _infer_used_hints(canonical, hints)
 
@@ -942,7 +1705,9 @@ def _build_document_state(
         else:
             classification_confidence = 35.0
 
-    required_fields = ["doc_type", "supplier", "billing_month", "energy_type", "raw_value", "raw_unit"]
+    required_fields = ["doc_type", "supplier", "billing_month", "energy_type"]
+    if not _is_meter_like_doc_type(doc_type):
+        required_fields.extend(["raw_value", "raw_unit"])
     if _is_gas_volume_unit(
         canonical["raw_unit"],
         energy_type=canonical["energy_type"],
@@ -952,6 +1717,26 @@ def _build_document_state(
 
     missing_fields = [field_name for field_name in required_fields if canonical.get(field_name) is None]
     forced_review_reasons: list[str] = []
+    accepts_without_energy_metrics = _supports_accept_without_energy_metrics(
+        energy_type=canonical["energy_type"],
+        doc_type=doc_type,
+        raw_unit=canonical["raw_unit"],
+        doc_specific=doc_specific,
+    )
+    requires_normalized_energy_metrics = canonical["energy_type"] in SUPPORTED_CO2_ENERGY_TYPES
+    has_meter_registers = _doc_specific_has_meter_registers(doc_specific)
+    has_normalizable_measurement = (
+        canonical["raw_value"] is not None
+        and canonical["raw_unit"] is not None
+        and not (
+            _is_gas_volume_unit(
+                canonical["raw_unit"],
+                energy_type=canonical["energy_type"],
+                doc_type=doc_type,
+            )
+            and canonical["pci_factor"] is None
+        )
+    )
 
     if canonical["doc_type"] == "OTHER":
         forced_review_reasons.append("Document type could not be classified confidently.")
@@ -959,10 +1744,18 @@ def _build_document_state(
         forced_review_reasons.append("Billing month could not be derived from the document.")
     if canonical["raw_unit"] is not None:
         normalized_factor = _normalization_factor_used(canonical["raw_unit"])
-        if normalized_factor is None and not _is_gas_volume_unit(
-            canonical["raw_unit"],
-            energy_type=canonical["energy_type"],
-            doc_type=doc_type,
+        if (
+            normalized_factor is None
+            and not _is_gas_volume_unit(
+                canonical["raw_unit"],
+                energy_type=canonical["energy_type"],
+                doc_type=doc_type,
+            )
+            and not _is_supported_water_unit(
+                canonical["raw_unit"],
+                energy_type=canonical["energy_type"],
+                doc_type=doc_type,
+            )
         ):
             forced_review_reasons.append(f"Unknown unit {canonical['raw_unit']!r}.")
     if _is_gas_volume_unit(
@@ -971,16 +1764,12 @@ def _build_document_state(
         doc_type=doc_type,
     ) and canonical["pci_factor"] is None:
         forced_review_reasons.append("Gas volume was detected without a usable PCI factor.")
-    if doc_type == "STEG_METER_READING" and (
-        canonical["raw_value"] is None or canonical["raw_unit"] is None
-    ):
-        forced_review_reasons.append("Meter sheet does not contain a trustworthy normalized quantity yet.")
-    if doc_type == "SONEDE_WATER_BILL":
-        forced_review_reasons.append("Water documents are ingested but not auto-accepted in v1.")
+    if _is_meter_like_doc_type(doc_type) and not has_meter_registers and canonical["raw_value"] is None:
+        forced_review_reasons.append("Meter sheet registers could not be extracted reliably.")
 
     normalized_kwh: float | None = None
     co2_emissions_kg: float | None = None
-    if not missing_fields and canonical["energy_type"] in SUPPORTED_CO2_ENERGY_TYPES:
+    if has_normalizable_measurement and requires_normalized_energy_metrics:
         try:
             normalized_kwh = _normalize_energy_value(
                 float(canonical["raw_value"]),
@@ -992,7 +1781,10 @@ def _build_document_state(
             co2_emissions_kg = estimate_co2_kg(normalized_kwh, str(canonical["energy_type"]))
         except ValueError as exc:
             forced_review_reasons.append(str(exc))
-    elif canonical["energy_type"] not in SUPPORTED_CO2_ENERGY_TYPES:
+    elif accepts_without_energy_metrics:
+        normalized_kwh = None
+        co2_emissions_kg = None
+    elif not requires_normalized_energy_metrics:
         normalized_kwh = None
         co2_emissions_kg = None
 
@@ -1000,9 +1792,9 @@ def _build_document_state(
     completeness_confidence = 0.0
     if required_fields:
         completeness_confidence = (completeness_resolved / len(required_fields)) * 100.0
-    if normalized_kwh is None and canonical["energy_type"] in SUPPORTED_CO2_ENERGY_TYPES:
+    if normalized_kwh is None and requires_normalized_energy_metrics and not accepts_without_energy_metrics:
         completeness_confidence = min(completeness_confidence, 60.0)
-    if doc_type in {"SONEDE_WATER_BILL", "OTHER"}:
+    if doc_type == "OTHER":
         completeness_confidence = min(completeness_confidence, 55.0)
 
     if ocr_payload.get("ocr_error"):
@@ -1011,6 +1803,8 @@ def _build_document_state(
     for reason in forced_review_reasons:
         if reason not in warnings:
             warnings.append(reason)
+
+    warnings = _unique_strings(warnings)
 
     overall_confidence = round(
         (0.35 * readability_confidence)
@@ -1026,18 +1820,18 @@ def _build_document_state(
     elif force_accept:
         if missing_fields:
             raise ValueError(f"Review is still missing required field(s): {', '.join(missing_fields)}")
-        if canonical["energy_type"] not in SUPPORTED_CO2_ENERGY_TYPES:
-            raise ValueError("Reviewed document still cannot be normalized into accepted energy data.")
-        if normalized_kwh is None:
+        if requires_normalized_energy_metrics and normalized_kwh is None and not accepts_without_energy_metrics:
             raise ValueError("Reviewed document still cannot be normalized into kWh.")
+        if not requires_normalized_energy_metrics and not accepts_without_energy_metrics:
+            raise ValueError("Reviewed document still cannot be accepted automatically.")
         review_status = "accepted"
         overall_confidence = max(overall_confidence, REVIEW_THRESHOLD)
     elif (
         overall_confidence < REVIEW_THRESHOLD
         or missing_fields
         or forced_review_reasons
-        or canonical["energy_type"] not in SUPPORTED_CO2_ENERGY_TYPES
-        or normalized_kwh is None
+        or (requires_normalized_energy_metrics and normalized_kwh is None and not accepts_without_energy_metrics)
+        or (not requires_normalized_energy_metrics and not accepts_without_energy_metrics)
     ):
         review_status = "requires_review"
         overall_confidence = min(overall_confidence, 79.0)
@@ -1236,6 +2030,12 @@ async def upload_document(
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
+    source_metadata = _store_source_file(
+        file_bytes,
+        file.filename or "uploaded-document",
+        file.content_type,
+    )
+
     try:
         hints = _build_hints(
             doc_type=doc_type,
@@ -1260,6 +2060,7 @@ async def upload_document(
         ocr_payload=ocr_payload,
         hints=hints,
     )
+    document.raw_json.update(source_metadata)
 
     try:
         return _persist_document(db, document)
@@ -1310,6 +2111,12 @@ async def upload_documents_batch(
             failed += 1
             continue
 
+        source_metadata = _store_source_file(
+            file_bytes,
+            filename,
+            upload_file.content_type,
+        )
+
         ocr_payload = run_gemini_ocr(
             file_bytes,
             hints.get("doc_type"),
@@ -1321,12 +2128,14 @@ async def upload_documents_batch(
             ocr_payload=ocr_payload,
             hints=hints,
         )
+        document.raw_json.update(source_metadata)
 
         try:
             persisted = _persist_document(db, document)
         except SQLAlchemyError as exc:
             db.rollback()
             failed_document = _build_failed_document(filename, "Failed to persist document.")
+            failed_document.raw_json.update(source_metadata)
             persisted = _persist_document(db, failed_document)
             persisted.raw_json["warnings"].append(str(exc))
 
@@ -1398,6 +2207,14 @@ def review_document(
     document.doc_type = rebuilt.doc_type
     document.supplier = rebuilt.supplier
     document.billing_month = rebuilt.billing_month
+    for key in (
+        "source_filename",
+        "source_storage_path",
+        "source_content_type",
+        "source_size_bytes",
+    ):
+        if key in raw_json:
+            rebuilt.raw_json[key] = raw_json[key]
     document.raw_json = rebuilt.raw_json
     document.normalized_kwh = rebuilt.normalized_kwh
     document.co2_emissions_kg = rebuilt.co2_emissions_kg
@@ -1626,6 +2443,23 @@ def get_documents_summary(db: Session = Depends(get_db)) -> dict[str, Any]:
             for row in by_supplier_rows
         ],
     }
+
+
+@router.get("/documents/{doc_id}/source")
+def get_document_source(doc_id: UUID, db: Session = Depends(get_db)) -> FileResponse:
+    document = db.query(Documents).filter(Documents.id == doc_id).first()
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found.")
+
+    source_path, source_content_type = _resolve_document_source_path(document)
+    if source_path is None or not source_path.exists():
+        raise HTTPException(status_code=404, detail="Document source file is unavailable.")
+
+    return FileResponse(
+        path=source_path,
+        media_type=source_content_type or "application/octet-stream",
+        filename=document.filename,
+    )
 
 
 @router.get("/documents/{doc_id}", response_model=DocumentsRead)
