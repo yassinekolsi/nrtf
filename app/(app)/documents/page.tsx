@@ -1765,6 +1765,24 @@ export default function DocumentsPage() {
                     </div>
                   ) : null}
 
+                  <div>
+                    <h4 className="mb-3 text-sm font-semibold text-foreground">
+                      Extracted Useful Fields
+                    </h4>
+                    <div className="space-y-2 rounded-lg bg-muted/30 p-4">
+                      {Object.entries(selectedCanonical).map(([key, value]) => (
+                        <div key={key} className="flex justify-between gap-4">
+                          <span className="text-sm text-muted-foreground capitalize">
+                            {key.replace(/_/g, " ")}
+                          </span>
+                          <span className="text-right text-sm font-medium">
+                            {value == null ? "—" : String(value)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
                   <div className="space-y-4 rounded-lg border border-border bg-muted/20 p-4">
                     <div className="flex items-center gap-2">
                       <CheckCircle2 className="h-4 w-4 text-energy-green" />
@@ -2032,24 +2050,6 @@ export default function DocumentsPage() {
                         ? "Save Document Changes"
                         : "Save Changes and Accept"}
                     </Button>
-                  </div>
-
-                  <div>
-                    <h4 className="mb-3 text-sm font-semibold text-foreground">
-                      Extracted Useful Fields
-                    </h4>
-                    <div className="space-y-2 rounded-lg bg-muted/30 p-4">
-                      {Object.entries(selectedCanonical).map(([key, value]) => (
-                        <div key={key} className="flex justify-between gap-4">
-                          <span className="text-sm text-muted-foreground capitalize">
-                            {key.replace(/_/g, " ")}
-                          </span>
-                          <span className="text-right text-sm font-medium">
-                            {value == null ? "—" : String(value)}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
                   </div>
 
                   {selectedMeterRegisters.length > 0 ? (
