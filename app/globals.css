@@ -1,0 +1,183 @@
+@config '../tailwind.config.ts';
+@import 'tailwindcss';
+@import 'tw-animate-css';
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --background: #FFFFFF;
+  --foreground: #1A1A1A;
+  --card: #FFFFFF;
+  --card-foreground: #1A1A1A;
+  --popover: #FFFFFF;
+  --popover-foreground: #1A1A1A;
+  --primary: #C9A84C;
+  --primary-foreground: #1A1A1A;
+  --secondary: #F5F5F5;
+  --secondary-foreground: #1A1A1A;
+  --muted: #F5F5F5;
+  --muted-foreground: color-mix(in srgb, var(--foreground) 62%, white);
+  --accent: #C9A84C;
+  --accent-foreground: #1A1A1A;
+  --destructive: #A84D46;
+  --destructive-foreground: #FFFFFF;
+  --border: color-mix(in srgb, var(--primary) 28%, white);
+  --input: color-mix(in srgb, var(--primary) 22%, white);
+  --ring: color-mix(in srgb, var(--primary) 68%, white);
+  --energy-green: #C9A84C;
+  --energy-green-foreground: #1A1A1A;
+  --warning-amber: color-mix(in srgb, var(--primary) 88%, white);
+  --warning-amber-foreground: #1A1A1A;
+  --alarm-red: #A84D46;
+  --alarm-red-foreground: #FFFFFF;
+  --navy: #1A1A1A;
+  --navy-light: color-mix(in srgb, var(--foreground) 88%, white);
+  --chart-1: #C9A84C;
+  --chart-2: color-mix(in srgb, var(--foreground) 74%, white);
+  --chart-3: color-mix(in srgb, var(--primary) 80%, white);
+  --chart-4: #A84D46;
+  --chart-5: color-mix(in srgb, var(--primary) 55%, var(--foreground));
+  --radius: 1rem;
+  --sidebar: #1A1A1A;
+  --sidebar-foreground: #FFFFFF;
+  --sidebar-primary: #C9A84C;
+  --sidebar-primary-foreground: #1A1A1A;
+  --sidebar-accent: color-mix(in srgb, var(--primary) 14%, var(--sidebar));
+  --sidebar-accent-foreground: #FFFFFF;
+  --sidebar-border: color-mix(in srgb, var(--primary) 40%, var(--sidebar));
+  --sidebar-ring: #C9A84C;
+}
+
+.dark {
+  --background: #FFFFFF;
+  --foreground: #1A1A1A;
+  --card: #FFFFFF;
+  --card-foreground: #1A1A1A;
+  --popover: #FFFFFF;
+  --popover-foreground: #1A1A1A;
+  --primary: #C9A84C;
+  --primary-foreground: #1A1A1A;
+  --secondary: #F5F5F5;
+  --secondary-foreground: #1A1A1A;
+  --muted: #F5F5F5;
+  --muted-foreground: color-mix(in srgb, var(--foreground) 62%, white);
+  --accent: #C9A84C;
+  --accent-foreground: #1A1A1A;
+  --destructive: #A84D46;
+  --destructive-foreground: #FFFFFF;
+  --border: color-mix(in srgb, var(--primary) 28%, white);
+  --input: color-mix(in srgb, var(--primary) 22%, white);
+  --ring: color-mix(in srgb, var(--primary) 68%, white);
+  --chart-1: #C9A84C;
+  --chart-2: color-mix(in srgb, var(--foreground) 74%, white);
+  --chart-3: color-mix(in srgb, var(--primary) 80%, white);
+  --chart-4: #A84D46;
+  --chart-5: color-mix(in srgb, var(--primary) 55%, var(--foreground));
+  --sidebar: #1A1A1A;
+  --sidebar-foreground: #FFFFFF;
+  --sidebar-primary: #C9A84C;
+  --sidebar-primary-foreground: #1A1A1A;
+  --sidebar-accent: color-mix(in srgb, var(--primary) 14%, var(--sidebar));
+  --sidebar-accent-foreground: #FFFFFF;
+  --sidebar-border: color-mix(in srgb, var(--primary) 40%, var(--sidebar));
+  --sidebar-ring: #C9A84C;
+}
+
+@theme inline {
+  --font-sans: var(--font-lato);
+  --font-body: var(--font-lato);
+  --font-heading: var(--font-raleway);
+  --font-mono: 'Geist Mono', 'Geist Mono Fallback';
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    @apply bg-background;
+  }
+  body {
+    @apply bg-background font-sans text-foreground antialiased;
+    font-feature-settings: 'rlig' 1, 'calt' 1;
+  }
+  ::selection {
+    background: color-mix(in srgb, var(--primary) 24%, white);
+    color: var(--foreground);
+  }
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6,
+  nav a,
+  [data-slot='button'],
+  [data-slot='card-title'],
+  [data-slot='sheet-title'],
+  [data-slot='table-head'] {
+    font-family: var(--font-raleway), 'Raleway', sans-serif;
+  }
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6,
+  [data-slot='card-title'],
+  [data-slot='sheet-title'] {
+    letter-spacing: -0.02em;
+  }
+  nav a,
+  [data-slot='button'],
+  [data-slot='table-head'] {
+    letter-spacing: 0.08em;
+  }
+  td,
+  p,
+  input,
+  textarea,
+  select {
+    font-family: var(--font-lato), 'Lato', sans-serif;
+  }
+  hr {
+    border: 0;
+    border-top: 1px solid color-mix(in srgb, var(--primary) 50%, white);
+  }
+}
