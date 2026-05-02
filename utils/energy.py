@@ -33,11 +33,12 @@ UNIT_TO_KWH = {
 }
 
 CO2_FACTORS_KG_PER_KWH = {
-    "electricity": 0.2670,
-    "natural_gas": 0.2020,
+    "electricity": 0.50,
+    "natural_gas": 0.202,
     "fuel_oil": 0.2670,
     "coal": 0.3410,
-    "default": 0.2670,
+    "self_produced": 0.0,
+    "default": 0.50,
 }
 
 SENSOR_THRESHOLDS = {
