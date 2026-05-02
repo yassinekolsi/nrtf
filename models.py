@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import BigInteger, Boolean, Column, Float, String, TIMESTAMP
+from sqlalchemy import BigInteger, Boolean, Column, Float, String, TIMESTAMP, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 from database import Base
@@ -25,11 +25,18 @@ class Documents(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     filename = Column(String, nullable=False)
     doc_type = Column(String, nullable=False)
-    supplier = Column(String, nullable=False)
-    billing_month = Column(String, nullable=False)
+    supplier = Column(String, nullable=True)
+    billing_month = Column(String, nullable=True)
     raw_json = Column(JSONB, nullable=False)
-    normalized_kwh = Column(Float, nullable=False)
-    co2_emissions_kg = Column(Float, nullable=False)
+    normalized_kwh = Column(Float, nullable=True)
+    co2_emissions_kg = Column(Float, nullable=True)
+    review_status = Column(
+        String,
+        nullable=False,
+        default="accepted",
+        server_default=text("'accepted'"),
+    )
+    overall_confidence = Column(Float, nullable=True)
 
 
 class ScadaLedger(Base):

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import {
   BarChart,
   Bar,
@@ -164,9 +165,11 @@ export default function EnergiePage() {
               <CardTitle className="text-lg font-semibold">
                 STEG Billing — November 2025
               </CardTitle>
-              <Button variant="outline" className="gap-2">
-                <Upload className="h-4 w-4" />
-                {t.importReading}
+              <Button variant="outline" className="gap-2" asChild>
+                <Link href="/documents">
+                  <Upload className="h-4 w-4" />
+                  {t.importReading}
+                </Link>
               </Button>
             </CardHeader>
             <CardContent className="space-y-6">

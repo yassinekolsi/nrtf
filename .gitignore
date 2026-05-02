@@ -9,8 +9,11 @@ next.user-config.*
 .env
 # Environment variables
 .env*.local
-
+NRTF-Hardware
 # Common ignores
 node_modules
 .next/
+Hackathon-Maroc
 .DS_Store
+data
+__pycache__/
