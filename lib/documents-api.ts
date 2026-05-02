@@ -4,6 +4,7 @@ export type ReviewStatus = 'processing' | 'accepted' | 'requires_review' | 'fail
 
 export interface DocumentRecord {
   id: string
+  created_at: string | null
   filename: string
   doc_type: string
   supplier: string | null

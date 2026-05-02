@@ -31,7 +31,7 @@ export interface Alarm {
 // Current KPIs
 export const currentKPIs = {
   puissanceMoteur: 1195, // kW
-  consommationGaz: 273, // Nm³/h
+  temperature: 28.4, // °C
   importSTEG: -407, // kW (negative = selling)
   facteurPuissance: 0.97,
   eauGlaceeTT01: 6.2, // °C

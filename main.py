@@ -49,6 +49,20 @@ def ensure_documents_schema() -> None:
                 text("UPDATE documents SET overall_confidence = 100.0 WHERE overall_confidence IS NULL")
             )
 
+        if "created_at" not in columns:
+            connection.execute(
+                text("ALTER TABLE documents ADD COLUMN created_at TIMESTAMPTZ")
+            )
+            connection.execute(
+                text("UPDATE documents SET created_at = CURRENT_TIMESTAMP WHERE created_at IS NULL")
+            )
+            connection.execute(
+                text("ALTER TABLE documents ALTER COLUMN created_at SET DEFAULT CURRENT_TIMESTAMP")
+            )
+            connection.execute(
+                text("ALTER TABLE documents ALTER COLUMN created_at SET NOT NULL")
+            )
+
         for column_name in (
             "supplier",
             "billing_month",

@@ -2397,6 +2397,7 @@ def list_documents(
 
     return (
         query.order_by(
+            Documents.created_at.desc(),
             Documents.review_status.asc(),
             text("to_date(billing_month, 'MM/YYYY') DESC NULLS LAST"),
             Documents.billing_month.desc(),

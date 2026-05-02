@@ -27,10 +27,10 @@ export default function DashboardPage() {
           status="good"
         />
         <KPICard
-          label={t.gasConsumption}
-          value={currentKPIs.consommationGaz}
-          unit="Nm³/h"
-          status="normal"
+          label={t.temperature}
+          value={currentKPIs.temperature}
+          unit={t.celsius}
+          status={currentKPIs.temperature <= 30 ? "good" : currentKPIs.temperature <= 35 ? "warning" : "critical"}
         />
         <KPICard
           label={t.stegImport}

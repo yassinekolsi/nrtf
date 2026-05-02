@@ -68,10 +68,10 @@ export function TopBar() {
           variant="outline"
           size="sm"
           onClick={toggleLanguage}
-          className="border-primary/45 text-sidebar-foreground hover:border-primary hover:bg-primary/10 hover:text-primary"
+          className="border-primary/45 text-sidebar-foreground hover:border-primary hover:bg-primary/10 hover:text-primary after:content-none"
         >
           <Globe className="h-4 w-4" />
-          {language === "en" ? "FR" : "EN"}
+          {language.toUpperCase()}
         </Button>
 
         {/* Alarm Badge */}

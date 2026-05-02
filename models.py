@@ -23,6 +23,11 @@ class Documents(Base):
     __tablename__ = "documents"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    created_at = Column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
     filename = Column(String, nullable=False)
     doc_type = Column(String, nullable=False)
     supplier = Column(String, nullable=True)

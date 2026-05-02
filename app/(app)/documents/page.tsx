@@ -139,6 +139,70 @@ function formatNumber(value: unknown, maximumFractionDigits = 2) {
   }).format(numericValue);
 }
 
+const relativeTimeFormatter = new Intl.RelativeTimeFormat("en", {
+  numeric: "auto",
+});
+
+const absoluteDateTimeFormatter = new Intl.DateTimeFormat("en-GB", {
+  dateStyle: "medium",
+  timeStyle: "short",
+});
+
+function parseDateValue(value: unknown) {
+  if (value instanceof Date && Number.isFinite(value.getTime())) {
+    return value;
+  }
+
+  if (typeof value !== "string" || !value.trim()) {
+    return null;
+  }
+
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) ? parsed : null;
+}
+
+function formatAbsoluteDateTime(value: Date | null) {
+  return value ? absoluteDateTimeFormatter.format(value) : "—";
+}
+
+function formatRelativeTime(value: Date | null, nowMs: number) {
+  if (!value) {
+    return "—";
+  }
+
+  const diffMs = value.getTime() - nowMs;
+  const absDiffMs = Math.abs(diffMs);
+
+  if (absDiffMs < 45_000) {
+    return "just now";
+  }
+
+  const minuteMs = 60_000;
+  const hourMs = 60 * minuteMs;
+  const dayMs = 24 * hourMs;
+  const weekMs = 7 * dayMs;
+  const monthMs = 30 * dayMs;
+  const yearMs = 365 * dayMs;
+
+  if (absDiffMs < hourMs) {
+    return relativeTimeFormatter.format(Math.round(diffMs / minuteMs), "minute");
+  }
+  if (absDiffMs < dayMs) {
+    return relativeTimeFormatter.format(Math.round(diffMs / hourMs), "hour");
+  }
+  if (absDiffMs < weekMs) {
+    return relativeTimeFormatter.format(Math.round(diffMs / dayMs), "day");
+  }
+  if (absDiffMs < monthMs) {
+    return relativeTimeFormatter.format(Math.round(diffMs / weekMs), "week");
+  }
+  if (absDiffMs < yearMs) {
+    return relativeTimeFormatter.format(Math.round(diffMs / monthMs), "month");
+  }
+
+  return relativeTimeFormatter.format(Math.round(diffMs / yearMs), "year");
+}
+
 function getRawObject(value: unknown) {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -170,12 +234,6 @@ type MeterRegister = {
   registerRole: string | null;
   flowDirection: string | null;
   rows: MeterRegisterRow[];
-};
-
-type MeterSection = {
-  side: string;
-  title: string;
-  registers: MeterRegister[];
 };
 
 function getStringField(
@@ -387,31 +445,28 @@ function formatStructuredLabel(value: string | null | undefined) {
     .join(" ");
 }
 
-function getMeterSections(registers: MeterRegister[]) {
-  const sectionOrder = ["consumption", "injection", "production", "other"];
-  const sectionTitles: Record<string, string> = {
-    consumption: "Consumption Side",
-    injection: "Injection Side",
-    production: "Production Side",
-    other: "Other",
-  };
+function isBlankMeterValue(value: number | null) {
+  return value == null || value === 0;
+}
 
-  return sectionOrder
-    .map((side) => {
-      const sectionRegisters = registers.filter(
-        (register) => (register.side ?? "other") === side
-      );
-      if (sectionRegisters.length === 0) {
-        return null;
-      }
+function isBlankMeterRow(row: MeterRegisterRow) {
+  return (
+    isBlankMeterValue(row.ancien) &&
+    isBlankMeterValue(row.nouveau) &&
+    isBlankMeterValue(row.delta)
+  );
+}
 
-      return {
-        side,
-        title: sectionTitles[side] ?? formatStructuredLabel(side),
-        registers: sectionRegisters,
-      } satisfies MeterSection;
-    })
-    .filter((section): section is MeterSection => section !== null);
+function getVisibleMeterRows(register: MeterRegister) {
+  if (register.rows.length === 0) {
+    return [];
+  }
+
+  if (register.rows.every(isBlankMeterRow)) {
+    return register.rows;
+  }
+
+  return register.rows.filter((row) => !isBlankMeterRow(row));
 }
 
 function getCanonical(doc: DocumentRecord) {
@@ -474,6 +529,33 @@ function getOverallConfidence(doc: DocumentRecord) {
   return typeof fromPayload === "number" ? fromPayload : null;
 }
 
+function getDocumentCreatedAt(doc: DocumentRecord) {
+  return parseDateValue(doc.created_at);
+}
+
+function getDocumentSortTimestamp(doc: DocumentRecord) {
+  return getDocumentCreatedAt(doc)?.getTime() ?? 0;
+}
+
+function sortDocumentsNewestFirst(items: DocumentRecord[]) {
+  return [...items].sort((left, right) => {
+    const timestampDiff = getDocumentSortTimestamp(right) - getDocumentSortTimestamp(left);
+    if (timestampDiff !== 0) {
+      return timestampDiff;
+    }
+
+    return right.id.localeCompare(left.id);
+  });
+}
+
+function getDocumentUploadedLabel(doc: DocumentRecord) {
+  return formatAbsoluteDateTime(getDocumentCreatedAt(doc));
+}
+
+function getDocumentUploadedRelativeLabel(doc: DocumentRecord, nowMs: number) {
+  return formatRelativeTime(getDocumentCreatedAt(doc), nowMs);
+}
+
 function getDisplayDate(doc: DocumentRecord) {
   const canonical = getCanonical(doc);
   const documentDate = canonical.document_date;
@@ -482,6 +564,25 @@ function getDisplayDate(doc: DocumentRecord) {
   }
 
   return doc.billing_month ?? "—";
+}
+
+function getMeterRowKey(
+  register: MeterRegister,
+  row: MeterRegisterRow,
+  rowIndex: number
+) {
+  return [
+    register.registerLabel,
+    register.registerId ?? "none",
+    register.readingName ?? "none",
+    register.side ?? "none",
+    row.label ?? "none",
+    row.code ?? "none",
+    row.ancien ?? "none",
+    row.nouveau ?? "none",
+    row.delta ?? "none",
+    rowIndex,
+  ].join("::");
 }
 
 function getDisplayMainValue(doc: DocumentRecord) {
@@ -618,6 +719,7 @@ export default function DocumentsPage() {
     total_co2_kg: 0,
     by_supplier: [],
   });
+  const [relativeTimeNow, setRelativeTimeNow] = useState(() => Date.now());
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isReviewSubmitting, setIsReviewSubmitting] = useState(false);
@@ -695,8 +797,23 @@ export default function DocumentsPage() {
     setPreviewError(false);
   }, [selectedDoc]);
 
-  const acceptedDocuments = documents.filter((doc) => getReviewStatus(doc) === "accepted");
-  const reviewQueue = documents.filter((doc) => getReviewStatus(doc) !== "accepted");
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      setRelativeTimeNow(Date.now());
+    }, 60_000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, []);
+
+  const sortedDocuments = sortDocumentsNewestFirst(documents);
+  const acceptedDocuments = sortedDocuments.filter(
+    (doc) => getReviewStatus(doc) === "accepted"
+  );
+  const reviewQueue = sortedDocuments.filter(
+    (doc) => getReviewStatus(doc) !== "accepted"
+  );
   const acceptedCount = acceptedDocuments.length;
   const reviewCount = reviewQueue.length;
 
@@ -885,9 +1002,12 @@ export default function DocumentsPage() {
     ? getRawObject(selectedDoc.raw_json?.doc_specific)
     : null;
   const selectedMeterRegisters = getMeterRegisters(selectedDocSpecific);
-  const selectedMeterSections = getMeterSections(selectedMeterRegisters);
   const selectedSourceContentType = selectedDoc ? getSourceContentType(selectedDoc) : null;
   const selectedSourceUrl = selectedDoc ? getDocumentSourceUrl(selectedDoc.id) : null;
+  const selectedUploadedLabel = selectedDoc ? getDocumentUploadedLabel(selectedDoc) : "—";
+  const selectedUploadedRelativeLabel = selectedDoc
+    ? getDocumentUploadedRelativeLabel(selectedDoc, relativeTimeNow)
+    : "—";
 
   return (
     <div className="space-y-6">
@@ -1337,6 +1457,7 @@ export default function DocumentsPage() {
             <TableHeader>
               <TableRow>
                 <TableHead className="text-[15px]">File</TableHead>
+                <TableHead className="text-[15px]">Uploaded</TableHead>
                 <TableHead className="text-[15px]">{t.type}</TableHead>
                 <TableHead className="text-[15px]">Supplier</TableHead>
                 <TableHead className="text-[15px]">{t.period}</TableHead>
@@ -1347,13 +1468,13 @@ export default function DocumentsPage() {
             <TableBody>
               {isLoading ? (
                 <TableRow>
-                  <TableCell colSpan={6} className="py-10 text-center text-sm text-muted-foreground">
+                  <TableCell colSpan={7} className="py-10 text-center text-sm text-muted-foreground">
                     Loading review queue...
                   </TableCell>
                 </TableRow>
               ) : reviewQueue.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={6} className="py-10 text-center text-sm text-muted-foreground">
+                  <TableCell colSpan={7} className="py-10 text-center text-sm text-muted-foreground">
                     No documents currently need review.
                   </TableCell>
                 </TableRow>
@@ -1365,6 +1486,16 @@ export default function DocumentsPage() {
                     onClick={() => setSelectedDoc(doc)}
                   >
                     <TableCell className="text-[15px] font-medium">{doc.filename}</TableCell>
+                    <TableCell className="text-[15px]">
+                      <div className="flex flex-col">
+                        <span className="font-medium text-foreground">
+                          {getDocumentUploadedRelativeLabel(doc, relativeTimeNow)}
+                        </span>
+                        <span className="text-xs text-muted-foreground">
+                          {getDocumentUploadedLabel(doc)}
+                        </span>
+                      </div>
+                    </TableCell>
                     <TableCell className="text-[15px]">{formatDocType(doc.doc_type)}</TableCell>
                     <TableCell className="text-[15px]">{doc.supplier ?? "—"}</TableCell>
                     <TableCell className="text-[15px]">{doc.billing_month ?? "—"}</TableCell>
@@ -1394,7 +1525,8 @@ export default function DocumentsPage() {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead className="text-[15px]">{t.date}</TableHead>
+                <TableHead className="text-[15px]">Uploaded</TableHead>
+                <TableHead className="text-[15px]">Extracted Date</TableHead>
                 <TableHead className="text-[15px]">{t.type}</TableHead>
                 <TableHead className="text-[15px]">Supplier</TableHead>
                 <TableHead className="text-[15px]">{t.period}</TableHead>
@@ -1406,13 +1538,13 @@ export default function DocumentsPage() {
             <TableBody>
               {isLoading ? (
                 <TableRow>
-                  <TableCell colSpan={7} className="py-10 text-center text-sm text-muted-foreground">
+                  <TableCell colSpan={8} className="py-10 text-center text-sm text-muted-foreground">
                     Loading accepted documents...
                   </TableCell>
                 </TableRow>
               ) : acceptedDocuments.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={7} className="py-10 text-center text-sm text-muted-foreground">
+                  <TableCell colSpan={8} className="py-10 text-center text-sm text-muted-foreground">
                     No accepted documents yet.
                   </TableCell>
                 </TableRow>
@@ -1423,6 +1555,16 @@ export default function DocumentsPage() {
                     className="cursor-pointer hover:bg-muted/50"
                     onClick={() => setSelectedDoc(doc)}
                   >
+                    <TableCell className="text-[15px]">
+                      <div className="flex flex-col">
+                        <span className="font-medium text-foreground">
+                          {getDocumentUploadedRelativeLabel(doc, relativeTimeNow)}
+                        </span>
+                        <span className="text-xs text-muted-foreground">
+                          {getDocumentUploadedLabel(doc)}
+                        </span>
+                      </div>
+                    </TableCell>
                     <TableCell className="text-[15px]">{getDisplayDate(doc)}</TableCell>
                     <TableCell className="text-[15px]">
                       <div className="flex items-center gap-2">
@@ -1550,6 +1692,25 @@ export default function DocumentsPage() {
               <div className="overflow-y-auto p-6">
                 <div className="space-y-6">
                   <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="rounded-lg border border-border bg-muted/30 p-4">
+                      <p className="text-xs uppercase tracking-wide text-muted-foreground">
+                        Uploaded
+                      </p>
+                      <p className="mt-1 text-base font-semibold text-foreground">
+                        {selectedUploadedRelativeLabel}
+                      </p>
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        {selectedUploadedLabel}
+                      </p>
+                    </div>
+                    <div className="rounded-lg border border-border bg-muted/30 p-4">
+                      <p className="text-xs uppercase tracking-wide text-muted-foreground">
+                        Extracted Date
+                      </p>
+                      <p className="mt-1 text-base font-semibold text-foreground">
+                        {getDisplayDate(selectedDoc)}
+                      </p>
+                    </div>
                     <div className="rounded-lg border border-border bg-muted/30 p-4">
                       <p className="text-xs uppercase tracking-wide text-muted-foreground">
                         Document Type
@@ -1897,114 +2058,70 @@ export default function DocumentsPage() {
                         Register Tables
                       </h4>
                       <div className="space-y-4">
-                        {selectedMeterSections.map((section) => (
-                          <div key={section.side} className="space-y-3">
-                            <div className="flex items-center gap-2">
-                              <h5 className="text-sm font-semibold text-foreground">
-                                {section.title}
-                              </h5>
-                              <Badge variant="outline">
-                                {section.registers.length} CTR
-                              </Badge>
-                            </div>
+                        {selectedMeterRegisters.map((register, index) => {
+                          const visibleRows = getVisibleMeterRows(register);
 
-                            {section.registers.map((register, index) => (
-                              <div
-                                key={`${register.registerLabel}-${register.registerId ?? "none"}-${index}`}
-                                className="rounded-lg border border-border bg-muted/20 p-4"
-                              >
-                                <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                                  <div>
-                                    <p className="text-sm font-semibold text-foreground">
-                                      {register.registerLabel}
-                                    </p>
-                                    {register.readingName ? (
-                                      <p className="text-xs text-muted-foreground">
-                                        {register.readingName}
-                                      </p>
-                                    ) : null}
-                                  </div>
-                                  <div className="flex flex-wrap items-center gap-2">
-                                    {register.registerRole ? (
-                                      <Badge variant="outline">
-                                        {formatStructuredLabel(register.registerRole)}
-                                      </Badge>
-                                    ) : null}
-                                    {register.registerId ? (
-                                      <Badge variant="outline">CTR {register.registerId}</Badge>
-                                    ) : null}
-                                  </div>
+                          return (
+                            <div
+                              key={`${register.registerLabel}-${register.registerId ?? "none"}-${index}`}
+                              className="rounded-lg border border-border bg-muted/20 p-4"
+                            >
+                              <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
+                                <div>
+                                  <p className="text-sm font-semibold text-foreground">
+                                    {register.registerId
+                                      ? `CTR ${register.registerId}`
+                                      : register.registerLabel}
+                                  </p>
+                                  <p className="text-xs text-muted-foreground">
+                                    {register.registerRole
+                                      ? formatStructuredLabel(register.registerRole)
+                                      : register.registerLabel}
+                                  </p>
                                 </div>
-
-                                <Table>
-                                  <TableHeader>
-                                    <TableRow>
-                                      <TableHead>Label</TableHead>
-                                      <TableHead>Code</TableHead>
-                                      <TableHead>Type</TableHead>
-                                      <TableHead>Unit</TableHead>
-                                      <TableHead className="text-right">Ancien</TableHead>
-                                      <TableHead className="text-right">Nouveau</TableHead>
-                                      <TableHead className="text-right">Delta</TableHead>
-                                    </TableRow>
-                                  </TableHeader>
-                                  <TableBody>
-                                    {register.rows.map((row, rowIndex) => (
-                                      <TableRow
-                                        key={`${register.registerLabel}-${row.code ?? row.label ?? rowIndex}`}
-                                      >
-                                        <TableCell>{row.label ?? "—"}</TableCell>
-                                        <TableCell>{row.code ?? "—"}</TableCell>
-                                        <TableCell>
-                                          {row.quantityType ? (
-                                            <Badge variant="outline">
-                                              {formatStructuredLabel(row.quantityType)}
-                                            </Badge>
-                                          ) : (
-                                            "—"
-                                          )}
-                                        </TableCell>
-                                        <TableCell>{row.unit ?? "—"}</TableCell>
-                                        <TableCell className="text-right">
-                                          {row.ancien == null ? "—" : formatNumber(row.ancien, 0)}
-                                        </TableCell>
-                                        <TableCell className="text-right">
-                                          {row.nouveau == null ? "—" : formatNumber(row.nouveau, 0)}
-                                        </TableCell>
-                                        <TableCell className="text-right">
-                                          {row.delta == null ? "—" : formatNumber(row.delta, 0)}
-                                        </TableCell>
-                                      </TableRow>
-                                    ))}
-                                  </TableBody>
-                                </Table>
+                                {register.side ? (
+                                  <Badge variant="outline">
+                                    {formatStructuredLabel(register.side)}
+                                  </Badge>
+                                ) : null}
                               </div>
-                            ))}
-                          </div>
-                        ))}
+
+                              <Table>
+                                <TableHeader>
+                                  <TableRow>
+                                    <TableHead>Label</TableHead>
+                                    <TableHead>Code</TableHead>
+                                    <TableHead className="text-right">Ancien</TableHead>
+                                    <TableHead className="text-right">Nouveau</TableHead>
+                                    <TableHead className="text-right">Delta</TableHead>
+                                  </TableRow>
+                                </TableHeader>
+                                <TableBody>
+                                  {visibleRows.map((row, rowIndex) => (
+                                    <TableRow
+                                      key={getMeterRowKey(register, row, rowIndex)}
+                                    >
+                                      <TableCell>{row.label ?? "—"}</TableCell>
+                                      <TableCell>{row.code ?? "—"}</TableCell>
+                                      <TableCell className="text-right">
+                                        {row.ancien == null ? "—" : formatNumber(row.ancien, 0)}
+                                      </TableCell>
+                                      <TableCell className="text-right">
+                                        {row.nouveau == null ? "—" : formatNumber(row.nouveau, 0)}
+                                      </TableCell>
+                                      <TableCell className="text-right">
+                                        {row.delta == null ? "—" : formatNumber(row.delta, 0)}
+                                      </TableCell>
+                                    </TableRow>
+                                  ))}
+                                </TableBody>
+                              </Table>
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
                   ) : null}
-
-                  {selectedDocSpecific ? (
-                    <div>
-                      <h4 className="mb-3 text-sm font-semibold text-foreground">
-                        Document-Specific Extraction
-                      </h4>
-                      <pre className="overflow-x-auto rounded-lg bg-muted/30 p-4 text-xs text-foreground">
-                        {JSON.stringify(selectedDocSpecific, null, 2)}
-                      </pre>
-                    </div>
-                  ) : null}
-
-                  <div>
-                    <h4 className="mb-3 text-sm font-semibold text-foreground">
-                      Stored Payload
-                    </h4>
-                    <pre className="overflow-x-auto rounded-lg bg-muted/30 p-4 text-xs text-foreground">
-                      {JSON.stringify(selectedDoc.raw_json, null, 2)}
-                    </pre>
-                  </div>
                 </div>
               </div>
             </div>

@@ -17,7 +17,7 @@ interface Translations {
   
   // Dashboard
   enginePower: string;
-  gasConsumption: string;
+  temperature: string;
   stegImport: string;
   powerFactor: string;
   activeAlarms: string;
@@ -97,7 +97,7 @@ const translations: Record<Language, Translations> = {
     
     // Dashboard
     enginePower: "Engine Power",
-    gasConsumption: "Gas Consumption",
+    temperature: "Temperature",
     stegImport: "STEG Import",
     powerFactor: "Power Factor",
     activeAlarms: "Active Alarms",
@@ -175,7 +175,7 @@ const translations: Record<Language, Translations> = {
     
     // Dashboard
     enginePower: "Puissance Moteur",
-    gasConsumption: "Consommation Gaz",
+    temperature: "Temperature",
     stegImport: "Import STEG",
     powerFactor: "Facteur de Puissance",
     activeAlarms: "Alarmes Actives",
