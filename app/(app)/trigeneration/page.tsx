@@ -55,7 +55,7 @@ const SENSOR_IDS = {
 
 interface PowerHistoryPoint {
   date: string;
-  powerKW: number;
+  power: number;
   isAnomaly: boolean;
 }
 
@@ -110,7 +110,7 @@ export default function TrigenerationPage() {
                   hour: "2-digit",
                   minute: "2-digit",
                 }),
-                powerKW: reading.value / 1000,
+                power: reading.value,
                 isAnomaly: reading.quality.toLowerCase() !== "valid",
               })),
           );
@@ -149,10 +149,14 @@ export default function TrigenerationPage() {
     [latestReadings],
   );
 
-  const powerKW = sensors.power ? sensors.power.value / 1000 : undefined;
+  const power = sensors.power?.value;
+  const powerUnit = sensors.power?.unit || "W";
+  const utilizationPowerKW = powerUnit.toLowerCase() === "w" && typeof power === "number"
+    ? power / 1000
+    : power;
   const utilizationPercent = Math.min(
     100,
-    Math.max(0, Math.round(((scadaSummary?.avg_power_kw ?? powerKW ?? 0) / 1200) * 100)),
+    Math.max(0, Math.round(((scadaSummary?.avg_power_kw ?? utilizationPowerKW ?? 0) / 1200) * 100)),
   );
 
   return (
@@ -175,8 +179,8 @@ export default function TrigenerationPage() {
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
         <KPICard
           label={t.activePower}
-          value={formatValue(powerKW, 2)}
-          unit={t.kw}
+          value={formatValue(power, 2)}
+          unit={powerUnit}
           status="good"
           subtitle={sensors.power?.sensor_id ?? "No reading"}
         />
@@ -206,7 +210,7 @@ export default function TrigenerationPage() {
         <Card className="border-border bg-card">
             <CardHeader className="pb-2">
               <CardTitle className="text-lg font-semibold">
-              {t.dailyElectricalProduction} ({t.kw})
+              {t.dailyElectricalProduction} ({powerUnit})
               </CardTitle>
             </CardHeader>
             <CardContent>
@@ -244,11 +248,11 @@ export default function TrigenerationPage() {
                           borderRadius: "8px",
                           fontSize: "13px",
                         }}
-                        formatter={(value: number) => [`${value.toFixed(2)} ${t.kw}`, "Power"]}
+                        formatter={(value: number) => [`${value.toFixed(2)} ${powerUnit}`, "Power"]}
                       />
                       <Line
                         type="monotone"
-                        dataKey="powerKW"
+                        dataKey="power"
                         stroke="var(--chart-1)"
                         strokeWidth={2}
                         dot={false}
@@ -304,18 +308,22 @@ export default function TrigenerationPage() {
                         }}
                         formatter={(value: number, name: string, props: { payload?: { isAnomaly: boolean } }) => {
                           const isAnomaly = props.payload?.isAnomaly;
-                          return [`${value.toFixed(2)} ${t.kw} ${isAnomaly ? "(ANOMALY)" : ""}`, "Power"];
+                          return [`${value.toFixed(2)} ${powerUnit} ${isAnomaly ? "(ANOMALY)" : ""}`, "Power"];
                         }}
                       />
                       <ReferenceLine
-                        y={scadaSummary?.avg_power_kw ?? 0}
+                        y={
+                          powerUnit.toLowerCase() === "w"
+                            ? (scadaSummary?.avg_power_kw ?? 0) * 1000
+                            : scadaSummary?.avg_power_kw ?? 0
+                        }
                         stroke="var(--chart-2)"
                         strokeDasharray="5 5"
                         label={{ value: "SCADA avg", position: "right", fontSize: 11 }}
                       />
                       <Line
                         type="monotone"
-                        dataKey="powerKW"
+                        dataKey="power"
                         stroke="var(--chart-5)"
                         strokeWidth={2}
                         dot={<CustomDot />}

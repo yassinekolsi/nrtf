@@ -75,7 +75,7 @@ export default function DashboardPage() {
               minute: "2-digit",
               second: "2-digit",
             }),
-            puissanceMoteur: powerReading.value / 1000,
+            puissanceMoteur: powerReading.value,
           };
           return [...prev.slice(-23), nextPoint];
         });
@@ -150,6 +150,7 @@ export default function DashboardPage() {
     }),
     [latestReadings],
   );
+  const powerUnit = sensors.power?.unit || "W";
 
   const handleAcknowledge = async (eventId: string) => {
     await acknowledgeEvent(eventId);
@@ -202,8 +203,8 @@ export default function DashboardPage() {
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
         <KPICard
           label={t.enginePower}
-          value={formatValue(sensors.power ? sensors.power.value / 1000 : undefined, 2)}
-          unit={t.kw}
+          value={formatValue(sensors.power?.value, 2)}
+          unit={powerUnit}
           status="good"
           subtitle={sensors.power ? sensors.power.sensor_id : "No reading"}
         />
@@ -264,6 +265,7 @@ export default function DashboardPage() {
         data={powerChartData}
         loading={loading}
         error={telemetryError}
+        unit={powerUnit}
       />
 
       {/* Active Alarms */}

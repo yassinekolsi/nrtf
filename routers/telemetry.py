@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import time
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -13,6 +15,25 @@ from schemas import TelemetryDataCreate, TelemetryDataRead
 from utils.energy import check_sensor_anomaly
 
 router = APIRouter()
+
+TELEMETRY_MIN_TIMESTAMP_MS = int(
+    os.getenv("TELEMETRY_MIN_TIMESTAMP_MS", str(int(time.time() * 1000))) or "0"
+)
+
+INVALID_PACKET_TIMESTAMPS_SQL = """
+    SELECT DISTINCT timestamp_ms
+    FROM telemetry_data
+    WHERE
+        timestamp_ms >= :min_timestamp_ms
+        AND (
+        (type = 'temperature' AND (value < 0 OR value > 60))
+        OR (type = 'humidity' AND (value < 0 OR value > 100))
+        OR (type = 'voltage' AND (value < 0 OR value > 30))
+        OR (type = 'current' AND (value < 0 OR value > 5))
+        OR (type = 'power' AND value < 0)
+        OR (type = 'vibration_rms' AND (value < 0 OR value > 8))
+        )
+"""
 
 
 def _timestamp_ms_to_datetime(timestamp_ms: int) -> datetime:
@@ -67,12 +88,22 @@ def get_latest_telemetry(db: Session = Depends(get_db)) -> list[TelemetryDataRea
     rows = db.execute(
         text(
             """
+            WITH invalid_packet_timestamps AS (
+                """ + INVALID_PACKET_TIMESTAMPS_SQL + """
+            )
             SELECT DISTINCT ON (sensor_id)
-                   id, timestamp_ms, node_id, sensor_id, type, value, unit, quality
-            FROM telemetry_data
+                   td.id, td.timestamp_ms, td.node_id, td.sensor_id, td.type, td.value, td.unit, td.quality
+            FROM telemetry_data td
+            WHERE td.timestamp_ms >= :min_timestamp_ms
+              AND NOT EXISTS (
+                SELECT 1
+                FROM invalid_packet_timestamps invalid
+                WHERE invalid.timestamp_ms = td.timestamp_ms
+            )
             ORDER BY sensor_id, timestamp_ms DESC
             """
-        )
+        ),
+        {"min_timestamp_ms": TELEMETRY_MIN_TIMESTAMP_MS},
     ).mappings().all()
 
     return [TelemetryDataRead.model_validate(dict(row)) for row in rows]
@@ -83,14 +114,34 @@ def get_sensor_history(
     sensor_id: str,
     limit: int = Query(default=200, ge=1, le=5000),
     db: Session = Depends(get_db),
-) -> list[TelemetryData]:
-    return (
-        db.query(TelemetryData)
-        .filter(TelemetryData.sensor_id == sensor_id)
-        .order_by(TelemetryData.timestamp_ms.desc())
-        .limit(limit)
-        .all()
-    )
+) -> list[TelemetryDataRead]:
+    rows = db.execute(
+        text(
+            """
+            WITH invalid_packet_timestamps AS (
+                """ + INVALID_PACKET_TIMESTAMPS_SQL + """
+            )
+            SELECT td.id, td.timestamp_ms, td.node_id, td.sensor_id, td.type, td.value, td.unit, td.quality
+            FROM telemetry_data td
+            WHERE td.sensor_id = :sensor_id
+              AND td.timestamp_ms >= :min_timestamp_ms
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM invalid_packet_timestamps invalid
+                  WHERE invalid.timestamp_ms = td.timestamp_ms
+              )
+            ORDER BY td.timestamp_ms DESC
+            LIMIT :limit
+            """
+        ),
+        {
+            "sensor_id": sensor_id,
+            "limit": limit,
+            "min_timestamp_ms": TELEMETRY_MIN_TIMESTAMP_MS,
+        },
+    ).mappings().all()
+
+    return [TelemetryDataRead.model_validate(dict(row)) for row in rows]
 
 
 @router.get("/telemetry/stats")
@@ -98,17 +149,31 @@ def get_telemetry_stats(db: Session = Depends(get_db)) -> dict[str, int]:
     stats = db.execute(
         text(
             """
+            WITH invalid_packet_timestamps AS (
+                """ + INVALID_PACKET_TIMESTAMPS_SQL + """
+            ),
+            valid_telemetry AS (
+                SELECT *
+                FROM telemetry_data td
+                WHERE td.timestamp_ms >= :min_timestamp_ms
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM invalid_packet_timestamps invalid
+                    WHERE invalid.timestamp_ms = td.timestamp_ms
+                )
+            )
             SELECT
-                (SELECT COUNT(*) FROM telemetry_data) AS total_readings,
+                (SELECT COUNT(*) FROM valid_telemetry) AS total_readings,
                 (SELECT COUNT(*) FROM events_and_anomalies) AS anomaly_count,
                 (
                     SELECT COUNT(DISTINCT sensor_id)
-                    FROM telemetry_data
-                    WHERE timestamp_ms >= (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT - 300000
+                    FROM valid_telemetry
+                    WHERE timestamp_ms >= (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT - 60000
                 ) AS sensors_online,
-                (SELECT MAX(timestamp_ms) FROM telemetry_data) AS last_seen_ms
+                (SELECT MAX(timestamp_ms) FROM valid_telemetry) AS last_seen_ms
             """
-        )
+        ),
+        {"min_timestamp_ms": TELEMETRY_MIN_TIMESTAMP_MS},
     ).mappings().one()
 
     return {

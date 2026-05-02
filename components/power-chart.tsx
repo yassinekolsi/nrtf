@@ -24,10 +24,12 @@ interface PowerChartProps {
   data: PowerChartPoint[];
   loading?: boolean;
   error?: string | null;
+  unit?: string;
 }
 
-export function PowerChart({ data, loading = false, error = null }: PowerChartProps) {
+export function PowerChart({ data, loading = false, error = null, unit }: PowerChartProps) {
   const { t } = useLanguage();
+  const displayUnit = unit ?? t.kw;
 
   return (
     <Card className="border-border bg-card">
@@ -75,7 +77,7 @@ export function PowerChart({ data, loading = false, error = null }: PowerChartPr
                     fontSize: "14px",
                   }}
                   labelStyle={{ fontWeight: 600 }}
-                  formatter={(value: number) => [`${value.toFixed(2)} ${t.kw}`, t.enginePower]}
+                  formatter={(value: number) => [`${value.toFixed(2)} ${displayUnit}`, t.enginePower]}
                 />
                 <Legend
                   wrapperStyle={{ fontSize: "14px", paddingTop: "16px" }}
