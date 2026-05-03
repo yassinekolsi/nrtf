@@ -7,7 +7,8 @@ import {
   Zap, 
   Settings2, 
   FileText, 
-  AlertTriangle 
+  AlertTriangle,
+  Recycle
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useLanguage } from "@/lib/language-context";
@@ -18,6 +19,7 @@ const navItems = [
   { href: "/trigeneration", icon: Settings2, labelKey: "trigeneration" as const },
   { href: "/documents", icon: FileText, labelKey: "documents" as const },
   { href: "/alertes", icon: AlertTriangle, labelKey: "alerts" as const },
+  { href: "/recovery", icon: Recycle, labelKey: "recovery" as const },
 ];
 
 export function Sidebar() {

@@ -98,6 +98,13 @@ try:
 except ImportError:
     pass
 
+try:
+    from routers import recovery
+
+    app.include_router(recovery.router, prefix="/api", tags=["recovery"])
+except ImportError:
+    pass
+
 
 @app.get("/")
 def healthcheck() -> dict[str, str]:

@@ -11,6 +11,7 @@ interface Translations {
   trigeneration: string;
   documents: string;
   alerts: string;
+  recovery: string;
   
   // Top bar
   siteName: string;
@@ -91,6 +92,7 @@ const translations: Record<Language, Translations> = {
     trigeneration: "Tri-generation",
     documents: "Documents",
     alerts: "Alerts & History",
+    recovery: "Waste Heat",
     
     // Top bar
     siteName: "Kilani Group — Adwya Site",
@@ -169,6 +171,7 @@ const translations: Record<Language, Translations> = {
     trigeneration: "Tri-génération",
     documents: "Documents",
     alerts: "Alertes & Historique",
+    recovery: "Chaleur Fatale",
     
     // Top bar
     siteName: "Kilani Group — Site Adwya",
