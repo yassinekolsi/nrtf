@@ -6,6 +6,7 @@ import {
   LayoutDashboard, 
   Zap, 
   Settings2, 
+  Database,
   FileText, 
   AlertTriangle 
 } from "lucide-react";
@@ -15,7 +16,8 @@ import { useLanguage } from "@/lib/language-context";
 const navItems = [
   { href: "/dashboard", icon: LayoutDashboard, labelKey: "dashboard" as const },
   { href: "/energie", icon: Zap, labelKey: "energy" as const },
-  { href: "/trigeneration", icon: Settings2, labelKey: "trigeneration" as const },
+  { href: "/trigeneration", icon: Settings2, labelKey: "trigenerationLive" as const },
+  { href: "/scada", icon: Database, labelKey: "trigeneration" as const },
   { href: "/documents", icon: FileText, labelKey: "documents" as const },
   { href: "/alertes", icon: AlertTriangle, labelKey: "alerts" as const },
 ];

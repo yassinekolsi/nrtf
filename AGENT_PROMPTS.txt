@@ -1,7 +1,7 @@
 ================================================================================
 NRTF — AGENT PROMPTS (v5)
 ================================================================================
-
+DO NOT OVERRITE WORKDONE MD FILE BUT INSTEAD ADD AT THE END
 Workspace: E:\nrtf
 Product: EnergyOS — industrial AI energy dashboard, ADWYA pharmaceutical
          factory (Kilani Group), Alpha/Beta/Gamma zones.

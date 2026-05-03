@@ -163,7 +163,7 @@ export default function TrigenerationPage() {
     <div className="space-y-6">
       {/* Page Title */}
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-2xl font-bold text-foreground">{t.trigeneration}</h1>
+        <h1 className="text-2xl font-bold text-foreground">{t.trigenerationLive}</h1>
         <Badge className="bg-energy-green text-energy-green-foreground">
           Live from ESP32
         </Badge>

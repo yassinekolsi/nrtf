@@ -70,6 +70,15 @@ export interface ScadaSummary {
   record_count: number;
 }
 
+export interface ScadaRecord {
+  id: string;
+  timestamp: string;
+  normalized_kwh: number;
+  power_gross_kw: number;
+  gas_flow_nm3h: number;
+  raw_metrics: Record<string, unknown>;
+}
+
 async function parseError(response: Response): Promise<string> {
   try {
     const payload: unknown = await response.json();
@@ -159,4 +168,21 @@ export function acknowledgeEvent(id: string) {
 
 export function fetchScadaSummary() {
   return apiFetch<ScadaSummary>("/scada/summary");
+}
+
+export function fetchScadaRecords(params?: { skip?: number; limit?: number }) {
+  return apiFetch<ScadaRecord[]>(withParams("/scada", params));
+}
+
+export function uploadScadaExcel(formData: FormData) {
+  return apiFetch<{
+    inserted: number;
+    skipped: number;
+    pci_factor: number;
+    interval_minutes: number;
+    sheet_name: string;
+  }>("/scada/upload/excel", {
+    method: "POST",
+    body: formData,
+  });
 }

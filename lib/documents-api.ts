@@ -161,6 +161,19 @@ export function uploadExcelDocuments(formData: FormData) {
   })
 }
 
+export function uploadScadaExcel(formData: FormData) {
+  return apiFetch<{
+    inserted: number
+    skipped: number
+    pci_factor: number
+    interval_minutes: number
+    sheet_name: string
+  }>('/scada/upload/excel', {
+    method: 'POST',
+    body: formData,
+  })
+}
+
 export function reviewDocument(id: string, payload: DocumentReviewPayload) {
   return apiFetch<DocumentRecord>(`/documents/${id}/review`, {
     method: 'PATCH',

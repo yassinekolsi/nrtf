@@ -9,6 +9,8 @@ interface Translations {
   dashboard: string;
   energy: string;
   trigeneration: string;
+  trigenerationLive: string;
+  scada: string;
   documents: string;
   alerts: string;
   
@@ -89,6 +91,8 @@ const translations: Record<Language, Translations> = {
     dashboard: "Dashboard",
     energy: "Energy & Billing",
     trigeneration: "Tri-generation",
+    trigenerationLive: "Tri-generation Live",
+    scada: "SCADA",
     documents: "Documents",
     alerts: "Alerts & History",
     
@@ -167,6 +171,8 @@ const translations: Record<Language, Translations> = {
     dashboard: "Tableau de Bord",
     energy: "Énergie & Facturation",
     trigeneration: "Tri-génération",
+    trigenerationLive: "Tri-génération Live",
+    scada: "SCADA",
     documents: "Documents",
     alerts: "Alertes & Historique",
     
