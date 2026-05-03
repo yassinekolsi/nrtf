@@ -20,6 +20,11 @@ node_modules
 
 # Hardware / non-deploy stuff
 NRTF-Hardware
+!NRTF-Hardware/
+NRTF-Hardware/*
+!NRTF-Hardware/certs/
+NRTF-Hardware/certs/*
+!NRTF-Hardware/certs/ca.crt
 data/
 
 # IDE & OS

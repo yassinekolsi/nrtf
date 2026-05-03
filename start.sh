@@ -14,6 +14,10 @@ for i in $(seq 1 30); do
   sleep 1
 done
 
+echo "==> Starting MQTT bridge ..."
+python -u scripts/mqtt_to_api.py &
+BRIDGE_PID=$!
+
 echo "==> Starting Next.js frontend on :${PORT:-3000} ..."
 cd frontend
 PORT=${PORT:-3000} HOSTNAME=0.0.0.0 exec node server.js

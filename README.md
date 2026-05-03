@@ -2,6 +2,9 @@
 
 End-to-end platform for an industrial trigeneration site in Tunisia. It unifies IoT telemetry, SCADA Excel exports, and energy documents into a single dashboard with CO2 tracking and anomaly detection.
 
+## 🌐 Live Demo (Render)
+- https://nrtf.onrender.com
+
 ## 🌟 Key Features
 
 ### 1. Unified Industrial Dashboard
@@ -59,6 +62,14 @@ End-to-end platform for an industrial trigeneration site in Tunisia. It unifies 
 ```powershell
 .\start.ps1 -Docker
 ```
+
+## ⚠️ Live Telemetry in the Cloud
+The MQTT bridge can run inside the Render container, but Render must be able to reach your MQTT broker.
+If your broker is LAN-only, live telemetry will stay at 0 in production.
+
+To get live data in the cloud, you need one of these:
+- A public MQTT broker with TLS, reachable from Render
+- A VPS or tunnel that can reach your LAN broker and forward MQTT traffic
 
 ## 📊 Data Ingestion Guides
 

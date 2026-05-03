@@ -36,6 +36,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Backend source
 COPY main.py database.py models.py schemas.py ./
 COPY routers/ routers/
+COPY scripts/ scripts/
+COPY NRTF-Hardware/certs/ca.crt ./certs/ca.crt
 
 # Frontend standalone build from Stage 1
 COPY --from=frontend /build/.next/standalone ./frontend/

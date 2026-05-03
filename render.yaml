@@ -11,6 +11,8 @@ services:
     plan: free
     healthCheckPath: /
     envVars:
+      - key: NEXT_PUBLIC_API_BASE_URL
+        value: /api
       - key: DATABASE_URL
         sync: false       # set manually in Render dashboard
       - key: GEMINI_API_KEY
@@ -28,4 +30,4 @@ services:
       - key: MQTT_PASSWORD
         sync: false
       - key: MQTT_CA_CERT
-        sync: false
+        value: /app/certs/ca.crt
