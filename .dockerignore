@@ -11,7 +11,7 @@ __pycache__
 .venv
 venv
 
-# Node modules (built inside container)
+# Node modules (rebuilt inside container)
 node_modules
 
 # Environment files (secrets come from Render dashboard)
@@ -38,6 +38,5 @@ tsconfig.tsbuildinfo
 # Docs / meta
 AGENT_PROMPTS.txt
 WORKDONE.md
-README.md
 diagram.mermaid
 docs/
