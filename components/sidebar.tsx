@@ -35,9 +35,18 @@ const navItems = [
   { href: "/alertes", icon: AlertTriangle, labelKey: "alerts" as const },
 ];
 
-export function Sidebar() {
+type SidebarVariant = "desktop" | "mobile";
+
+interface SidebarProps {
+  variant?: SidebarVariant;
+  onNavigate?: () => void;
+  className?: string;
+}
+
+export function Sidebar({ variant = "desktop", onNavigate, className }: SidebarProps) {
   const pathname = usePathname();
   const { t } = useLanguage();
+  const isMobileVariant = variant === "mobile";
 
   const handlePrefetch = (href: string) => {
     if (href === "/alertes") return;
@@ -45,15 +54,32 @@ export function Sidebar() {
   };
 
   return (
-    <aside className="fixed left-0 top-0 z-40 flex h-screen w-64 flex-col border-r border-sidebar-border/70 bg-sidebar text-sidebar-foreground">
+    <aside
+      className={cn(
+        isMobileVariant
+          ? "flex h-full w-full flex-col bg-sidebar text-sidebar-foreground"
+          : "fixed left-0 top-0 z-40 flex h-screen w-64 flex-col border-r border-sidebar-border/70 bg-sidebar text-sidebar-foreground",
+        className
+      )}
+    >
       {/* Logo / Brand */}
-      <div className="flex h-20 items-center border-b border-sidebar-border/70 px-7">
+      <div
+        className={cn(
+          "flex items-center border-b border-sidebar-border/70",
+          isMobileVariant ? "h-16 px-5" : "h-20 px-7"
+        )}
+      >
         <div className="flex items-center gap-3">
           <div className="flex h-11 w-11 items-center justify-center rounded-full border border-primary/35 bg-primary">
             <Zap className="h-5 w-5 text-primary-foreground" />
           </div>
           <div className="space-y-1">
-            <span className="block font-heading text-[0.72rem] font-semibold uppercase tracking-[0.28em] text-primary">
+            <span
+              className={cn(
+                "block font-heading font-semibold uppercase tracking-[0.28em] text-primary",
+                isMobileVariant ? "text-[0.68rem]" : "text-[0.72rem]"
+              )}
+            >
               Kilani Group
             </span>
             <span className="block text-sm text-sidebar-foreground/72">EnergyOS</span>
@@ -62,7 +88,12 @@ export function Sidebar() {
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 space-y-2 px-4 py-6">
+      <nav
+        className={cn(
+          "flex-1 space-y-2 px-4",
+          isMobileVariant ? "overflow-y-auto py-5" : "py-6"
+        )}
+      >
         {navItems.map((item) => {
           const isActive = pathname === item.href || pathname.startsWith(`${item.href}/`);
           const Icon = item.icon;
@@ -71,6 +102,7 @@ export function Sidebar() {
             <Link
               key={item.href}
               href={item.href}
+              onClick={() => onNavigate?.()}
               onMouseEnter={() => handlePrefetch(item.href)}
               onFocus={() => handlePrefetch(item.href)}
               className={cn(
@@ -88,7 +120,12 @@ export function Sidebar() {
       </nav>
 
       {/* Footer */}
-      <div className="border-t border-sidebar-border/70 px-7 py-5">
+      <div
+        className={cn(
+          "border-t border-sidebar-border/70",
+          isMobileVariant ? "px-5 py-4" : "px-7 py-5"
+        )}
+      >
         <p className="text-xs uppercase tracking-[0.18em] text-sidebar-foreground/58">
           v1.0.0 — Adwya Plant
         </p>

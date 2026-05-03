@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Bell, Globe } from "lucide-react";
+import { Bell, Globe, Menu } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useLanguage } from "@/lib/language-context";
 import { fetchEventStats } from "@/lib/api-client";
@@ -10,7 +10,11 @@ const timeRanges = ["1h", "6h", "24h", "7d", "30d", "custom"];
 
 
 
-export function TopBar() {
+interface TopBarProps {
+  onMenuClick?: () => void;
+}
+
+export function TopBar({ onMenuClick }: TopBarProps) {
   const { language, setLanguage, t } = useLanguage();
   const [currentTime, setCurrentTime] = useState<string>("");
   const [currentDate, setCurrentDate] = useState<string>("");
@@ -74,10 +78,19 @@ export function TopBar() {
 
 
   return (
-    <header className="fixed left-64 right-0 top-0 z-30 flex h-20 items-center justify-between gap-5 border-b border-primary/45 bg-sidebar px-8 text-sidebar-foreground">
+    <header className="fixed left-0 right-0 top-0 z-30 flex h-16 items-center justify-between gap-3 border-b border-primary/45 bg-sidebar px-4 text-sidebar-foreground md:left-64 md:h-20 md:gap-5 md:px-8">
       {/* Site Name */}
-      <div className="flex min-w-[210px] items-center">
-        <h1 className="font-heading text-base font-semibold uppercase tracking-[0.24em] text-primary">
+      <div className="flex min-w-0 items-center gap-2 md:min-w-[210px]">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="md:hidden"
+          onClick={onMenuClick}
+          aria-label="Open navigation"
+        >
+          <Menu className="h-5 w-5" />
+        </Button>
+        <h1 className="truncate font-heading text-sm font-semibold uppercase tracking-[0.22em] text-primary md:text-base md:tracking-[0.24em]">
           {t.siteName}
         </h1>
       </div>
@@ -93,7 +106,7 @@ export function TopBar() {
           </span>
         </div>
 
-        <div className="flex min-w-0 items-center gap-1 overflow-x-auto rounded-full border border-primary/30 bg-white/5 p-1">
+        <div className="hidden min-w-0 items-center gap-1 overflow-x-auto rounded-full border border-primary/30 bg-white/5 p-1 sm:flex">
           {timeRanges.map((range) => (
             <Button
               key={range}
