@@ -755,15 +755,12 @@ export default function DocumentsPage() {
     total_co2_kg: 0,
     by_supplier: [],
   });
-<<<<<<< HEAD
   const [relativeTimeNow, setRelativeTimeNow] = useState(() => Date.now());
-=======
   const [co2Monthly, setCo2Monthly] = useState<DocumentsCo2MonthlyResponse>({
     factors: DEFAULT_CO2_FACTORS,
     items: [],
   });
   const [co2MonthlyError, setCo2MonthlyError] = useState<string | null>(null);
->>>>>>> c9868ad (feat:add CO2 calculation emission)
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isReviewSubmitting, setIsReviewSubmitting] = useState(false);

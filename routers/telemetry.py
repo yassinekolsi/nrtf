@@ -2,19 +2,25 @@ from __future__ import annotations
 
 import os
 import time
+import uuid
+import logging
+from collections import defaultdict, deque
 from datetime import datetime, timedelta
+from threading import Lock
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from database import get_db
+from database import SessionLocal, get_db
 from models import EventsAndAnomalies, TelemetryData
 from schemas import TelemetryDataCreate, TelemetryDataRead
 from utils.energy import check_sensor_anomaly
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 TELEMETRY_MIN_TIMESTAMP_MS = int(
     os.getenv("TELEMETRY_MIN_TIMESTAMP_MS", str(int(time.time() * 1000))) or "0"
@@ -23,6 +29,18 @@ STUCK_WINDOW = int(os.getenv("TELEMETRY_STUCK_WINDOW", "15") or "15")
 STUCK_TOLERANCE = float(os.getenv("TELEMETRY_STUCK_TOLERANCE", "0.0001") or "0.0001")
 SPIKE_STDDEV_MULTIPLIER = float(os.getenv("TELEMETRY_SPIKE_STDDEV", "3") or "3")
 SPIKE_MIN_SAMPLES = int(os.getenv("TELEMETRY_SPIKE_MIN_SAMPLES", "12") or "12")
+LIVE_HISTORY_HOURS = int(os.getenv("TELEMETRY_LIVE_HISTORY_HOURS", "24") or "24")
+LIVE_HISTORY_WINDOW_MS = int(timedelta(hours=LIVE_HISTORY_HOURS).total_seconds() * 1000)
+LIVE_HISTORY_MAX_POINTS_PER_SENSOR = int(
+    os.getenv("TELEMETRY_LIVE_MAX_POINTS_PER_SENSOR", "20000") or "20000"
+)
+LIVE_ONLINE_WINDOW_MS = int(os.getenv("TELEMETRY_LIVE_ONLINE_WINDOW_MS", "60000") or "60000")
+
+_live_lock = Lock()
+_live_latest_by_sensor: dict[str, TelemetryDataRead] = {}
+_live_history_by_sensor: dict[str, deque[TelemetryDataRead]] = defaultdict(
+    lambda: deque(maxlen=LIVE_HISTORY_MAX_POINTS_PER_SENSOR)
+)
 
 INVALID_PACKET_TIMESTAMPS_SQL = """
     SELECT DISTINCT timestamp_ms
@@ -107,87 +125,145 @@ def _values_close(target: float, values: list[float]) -> bool:
     return all(abs(value - target) <= STUCK_TOLERANCE for value in values)
 
 
-@router.post("/telemetry")
-def create_telemetry(
-    payload: list[TelemetryDataCreate],
-    db: Session = Depends(get_db),
-) -> dict[str, int]:
-    telemetry_rows: list[TelemetryData] = []
-    anomaly_rows: list[EventsAndAnomalies] = []
+def _record_live_readings(readings: list[TelemetryDataRead]) -> None:
+    cutoff_ms = int(time.time() * 1000) - LIVE_HISTORY_WINDOW_MS
+    with _live_lock:
+        for reading in readings:
+            _live_latest_by_sensor[reading.sensor_id] = reading
+            history = _live_history_by_sensor[reading.sensor_id]
+            history.append(reading)
+            while history and history[0].timestamp_ms < cutoff_ms:
+                history.popleft()
 
-    sensor_ids = {item.sensor_id for item in payload}
+
+def _get_live_snapshot(sensor_ids: list[str] | None = None) -> dict[str, Any]:
+    cutoff_ms = int(time.time() * 1000) - LIVE_HISTORY_WINDOW_MS
+    online_cutoff_ms = int(time.time() * 1000) - LIVE_ONLINE_WINDOW_MS
+
+    with _live_lock:
+        selected_sensor_ids = (
+            list(dict.fromkeys(sensor_ids))
+            if sensor_ids
+            else sorted(set(_live_latest_by_sensor) | set(_live_history_by_sensor))
+        )
+        latest = [
+            reading
+            for sensor_id in selected_sensor_ids
+            if (reading := _live_latest_by_sensor.get(sensor_id)) is not None
+        ]
+
+        history: dict[str, list[TelemetryDataRead]] = {}
+        total_readings = 0
+        anomaly_count = 0
+        last_seen_ms = 0
+        for sensor_id in selected_sensor_ids:
+            readings = [
+                reading
+                for reading in _live_history_by_sensor.get(sensor_id, [])
+                if reading.timestamp_ms >= cutoff_ms
+            ]
+            history[sensor_id] = readings
+            total_readings += len(readings)
+            anomaly_count += sum(1 for reading in readings if reading.quality.lower() != "valid")
+            if readings:
+                last_seen_ms = max(last_seen_ms, max(reading.timestamp_ms for reading in readings))
+
+        sensors_online = sum(1 for reading in latest if reading.timestamp_ms >= online_cutoff_ms)
+
+    return {
+        "latest": latest,
+        "history": history,
+        "stats": {
+            "total_readings": total_readings,
+            "anomaly_count": anomaly_count,
+            "sensors_online": sensors_online,
+            "last_seen_ms": last_seen_ms,
+        },
+    }
+
+
+def _build_anomaly_rows(
+    db: Session,
+    reading_rows: list[dict[str, Any]],
+) -> list[EventsAndAnomalies]:
+    anomaly_rows: list[EventsAndAnomalies] = []
+    sensor_ids = {str(item["sensor_id"]) for item in reading_rows}
     prev_values = _fetch_latest_values(db, sensor_ids)
 
-    for item in payload:
-        telemetry_rows.append(TelemetryData(**item.model_dump()))
+    for item in reading_rows:
+        sensor_id = str(item["sensor_id"])
+        sensor_type = str(item["type"])
+        value = float(item["value"])
+        quality = str(item["quality"])
+        timestamp_ms = int(item["timestamp_ms"])
 
-        prev_value = prev_values.get(item.sensor_id)
+        prev_value = prev_values.get(sensor_id)
         is_anomaly, reason, confidence = check_sensor_anomaly(
-            item.type,
-            item.value,
+            sensor_type,
+            value,
             prev_value,
         )
         if is_anomaly:
             anomaly_rows.append(
                 EventsAndAnomalies(
-                    timestamp=_timestamp_ms_to_datetime(item.timestamp_ms),
+                    timestamp=_timestamp_ms_to_datetime(timestamp_ms),
                     source="EDGE_AI",
                     description=reason,
                     severity="CRITIQUE",
                     acknowledged=False,
                     context_data={
-                        "sensor_id": item.sensor_id,
-                        "value": item.value,
+                        "sensor_id": sensor_id,
+                        "value": value,
                         "confidence": confidence,
-                        "quality": item.quality,
+                        "quality": quality,
                     },
                 )
             )
 
-        if item.quality.lower() == "invalid":
+        if quality.lower() == "invalid":
             anomaly_rows.append(
                 EventsAndAnomalies(
-                    timestamp=_timestamp_ms_to_datetime(item.timestamp_ms),
+                    timestamp=_timestamp_ms_to_datetime(timestamp_ms),
                     source="EDGE_AI",
                     description="Invalid sensor data",
                     severity="CRITIQUE",
                     acknowledged=False,
                     context_data={
-                        "sensor_id": item.sensor_id,
-                        "value": item.value,
+                        "sensor_id": sensor_id,
+                        "value": value,
                         "confidence": 1.0,
-                        "quality": item.quality,
+                        "quality": quality,
                     },
                 )
             )
 
-        recent_values = _fetch_recent_values(db, item.sensor_id, STUCK_WINDOW)
+        recent_values = _fetch_recent_values(db, sensor_id, STUCK_WINDOW)
         if len(recent_values) >= STUCK_WINDOW - 1:
             recent_slice = recent_values[: max(STUCK_WINDOW - 1, 0)]
             older_value = recent_values[STUCK_WINDOW - 1] if len(recent_values) >= STUCK_WINDOW else None
-            if _values_close(item.value, recent_slice) and (
-                older_value is None or abs(older_value - item.value) > STUCK_TOLERANCE
+            if _values_close(value, recent_slice) and (
+                older_value is None or abs(older_value - value) > STUCK_TOLERANCE
             ):
                 anomaly_rows.append(
                     EventsAndAnomalies(
-                        timestamp=_timestamp_ms_to_datetime(item.timestamp_ms),
+                        timestamp=_timestamp_ms_to_datetime(timestamp_ms),
                         source="EDGE_AI",
                         description="Stuck sensor detected",
                         severity="AVERTISSEMENT",
                         acknowledged=False,
                         context_data={
-                            "sensor_id": item.sensor_id,
-                            "value": item.value,
+                            "sensor_id": sensor_id,
+                            "value": value,
                             "confidence": 0.95,
                             "window": STUCK_WINDOW,
                         },
                     )
                 )
 
-        since_ms = item.timestamp_ms - int(timedelta(hours=24).total_seconds() * 1000)
+        since_ms = timestamp_ms - int(timedelta(hours=24).total_seconds() * 1000)
         sample_count, avg_value, stddev_value = _fetch_rollup_stats(
             db,
-            item.sensor_id,
+            sensor_id,
             since_ms,
         )
         if (
@@ -196,19 +272,19 @@ def create_telemetry(
             and stddev_value is not None
             and stddev_value > 0
         ):
-            delta = abs(item.value - avg_value)
+            delta = abs(value - avg_value)
             threshold = SPIKE_STDDEV_MULTIPLIER * stddev_value
             if delta > threshold:
                 anomaly_rows.append(
                     EventsAndAnomalies(
-                        timestamp=_timestamp_ms_to_datetime(item.timestamp_ms),
+                        timestamp=_timestamp_ms_to_datetime(timestamp_ms),
                         source="EDGE_AI",
                         description="Spike detected",
                         severity="AVERTISSEMENT",
                         acknowledged=False,
                         context_data={
-                            "sensor_id": item.sensor_id,
-                            "value": item.value,
+                            "sensor_id": sensor_id,
+                            "value": value,
                             "expected": avg_value,
                             "stddev": stddev_value,
                             "confidence": 0.85,
@@ -216,18 +292,56 @@ def create_telemetry(
                     )
                 )
 
+    return anomaly_rows
+
+
+def _persist_telemetry_rows(reading_rows: list[dict[str, Any]]) -> None:
+    db = SessionLocal()
     try:
+        telemetry_rows = [TelemetryData(**item) for item in reading_rows]
+        anomaly_rows = _build_anomaly_rows(db, reading_rows)
+
         db.add_all(telemetry_rows)
         db.add_all(anomaly_rows)
         db.commit()
-    except SQLAlchemyError as exc:
+    except SQLAlchemyError:
         db.rollback()
-        raise HTTPException(status_code=500, detail="Failed to persist telemetry data") from exc
+        logger.exception("Failed to persist telemetry data in background")
+    finally:
+        db.close()
+
+
+@router.post("/telemetry")
+def create_telemetry(
+    payload: list[TelemetryDataCreate],
+    background_tasks: BackgroundTasks,
+) -> dict[str, int]:
+    reading_rows: list[dict[str, Any]] = []
+    live_readings: list[TelemetryDataRead] = []
+
+    for item in payload:
+        reading_id = uuid.uuid4()
+        reading_data = item.model_dump()
+        row = {"id": reading_id, **reading_data}
+        reading_rows.append(row)
+        live_readings.append(TelemetryDataRead(id=reading_id, **reading_data))
+
+    # Keep dashboard reads off Neon: live endpoints serve this RAM buffer.
+    _record_live_readings(live_readings)
+    background_tasks.add_task(_persist_telemetry_rows, reading_rows)
 
     return {
-        "inserted": len(telemetry_rows),
-        "anomalies_created": len(anomaly_rows),
+        "inserted": len(reading_rows),
+        "anomalies_created": 0,
+        "queued_for_persistence": len(reading_rows),
     }
+
+
+@router.get("/telemetry/live")
+def get_live_telemetry(
+    sensor_id: list[str] | None = Query(default=None),
+) -> dict[str, Any]:
+    return _get_live_snapshot(sensor_id)
 
 
 @router.get("/telemetry/latest", response_model=list[TelemetryDataRead])
@@ -259,33 +373,56 @@ def get_latest_telemetry(db: Session = Depends(get_db)) -> list[TelemetryDataRea
 @router.get("/telemetry/history/{sensor_id}", response_model=list[TelemetryDataRead])
 def get_sensor_history(
     sensor_id: str,
-    limit: int = Query(default=200, ge=1, le=5000),
+    limit: int = Query(default=200, ge=1, le=20000),
+    hours: int | None = Query(default=None, ge=1, le=168),
+    since_ms: int | None = Query(default=None, ge=0),
+    until_ms: int | None = Query(default=None, ge=0),
+    order: str = Query(default="desc", pattern="^(asc|desc)$"),
     db: Session = Depends(get_db),
 ) -> list[TelemetryDataRead]:
+    now_ms = int(time.time() * 1000)
+    if hours is not None:
+        since_ms = now_ms - int(timedelta(hours=hours).total_seconds() * 1000)
+
+    effective_since = max(
+        TELEMETRY_MIN_TIMESTAMP_MS,
+        since_ms if since_ms is not None else TELEMETRY_MIN_TIMESTAMP_MS,
+    )
+    if until_ms is not None and until_ms < effective_since:
+        raise HTTPException(status_code=400, detail="until_ms must be greater than since_ms")
+
+    order_clause = "ASC" if order.lower() == "asc" else "DESC"
+    time_filter = "AND td.timestamp_ms <= :until_ms" if until_ms is not None else ""
+    params = {
+        "sensor_id": sensor_id,
+        "limit": limit,
+        "since_ms": effective_since,
+        "min_timestamp_ms": effective_since,
+    }
+    if until_ms is not None:
+        params["until_ms"] = until_ms
+
     rows = db.execute(
         text(
-            """
+            f"""
             WITH invalid_packet_timestamps AS (
-                """ + INVALID_PACKET_TIMESTAMPS_SQL + """
+                {INVALID_PACKET_TIMESTAMPS_SQL}
             )
             SELECT td.id, td.timestamp_ms, td.node_id, td.sensor_id, td.type, td.value, td.unit, td.quality
             FROM telemetry_data td
             WHERE td.sensor_id = :sensor_id
-              AND td.timestamp_ms >= :min_timestamp_ms
+              AND td.timestamp_ms >= :since_ms
+              {time_filter}
               AND NOT EXISTS (
                   SELECT 1
                   FROM invalid_packet_timestamps invalid
                   WHERE invalid.timestamp_ms = td.timestamp_ms
               )
-            ORDER BY td.timestamp_ms DESC
+            ORDER BY td.timestamp_ms {order_clause}
             LIMIT :limit
             """
         ),
-        {
-            "sensor_id": sensor_id,
-            "limit": limit,
-            "min_timestamp_ms": TELEMETRY_MIN_TIMESTAMP_MS,
-        },
+        params,
     ).mappings().all()
 
     return [TelemetryDataRead.model_validate(dict(row)) for row in rows]

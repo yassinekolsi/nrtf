@@ -51,6 +51,7 @@ interface Alarm {
   timestamp: string;
   equipment: string;
   description: string;
+  justification?: string;
   severity: "Critique" | "Moyen" | "Info";
   status: "En cours" | "Acquitté";
 }
@@ -60,6 +61,19 @@ function mapSeverity(severity: string): Alarm["severity"] {
   if (normalized === "CRITIQUE" || normalized === "CRITICAL") return "Critique";
   if (normalized === "INFO") return "Info";
   return "Moyen";
+}
+
+function formatNumber(value: number, digits = 2) {
+  return Number(value.toFixed(digits)).toLocaleString("fr-FR");
+}
+
+function toNumber(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
 }
 
 export default function AlertesPage() {
@@ -72,6 +86,44 @@ export default function AlertesPage() {
   const [severityFilter, setSeverityFilter] = useState<string>("all");
   const [dateFrom, setDateFrom] = useState<string>("");
   const [dateTo, setDateTo] = useState<string>("");
+
+  const buildJustification = (contextData: Record<string, unknown> | null | undefined) => {
+    if (!contextData || typeof contextData !== "object") return undefined;
+
+    const parts: string[] = [];
+    const sensorId = contextData.sensor_id;
+    const quality = contextData.quality;
+    const windowValue = toNumber(contextData.window);
+    const value = toNumber(contextData.value);
+    const expected = toNumber(contextData.expected);
+    const stddev = toNumber(contextData.stddev);
+    const confidence = toNumber(contextData.confidence);
+
+    if (typeof sensorId === "string" && sensorId.trim()) {
+      parts.push(`${t.sensor}: ${sensorId}`);
+    }
+    if (value !== null) {
+      parts.push(`${t.value}: ${formatNumber(value)}`);
+    }
+    if (expected !== null) {
+      parts.push(`${t.expected}: ${formatNumber(expected)}`);
+    }
+    if (stddev !== null) {
+      parts.push(`${t.stddev}: ${formatNumber(stddev)}`);
+    }
+    if (confidence !== null) {
+      const pct = confidence <= 1 ? confidence * 100 : confidence;
+      parts.push(`${t.confidence}: ${pct.toFixed(0)}%`);
+    }
+    if (typeof quality === "string" && quality.trim()) {
+      parts.push(`${t.quality}: ${quality}`);
+    }
+    if (windowValue !== null) {
+      parts.push(`${t.window}: ${windowValue}`);
+    }
+
+    return parts.length ? parts.join(" · ") : undefined;
+  };
 
   useEffect(() => {
     async function loadAlerts() {
@@ -88,6 +140,7 @@ export default function AlertesPage() {
             timestamp: event.timestamp,
             equipment: event.source,
             description: event.description,
+            justification: buildJustification(event.context_data),
             severity: mapSeverity(event.severity),
             status: event.acknowledged ? "Acquitté" : "En cours",
           })),
@@ -318,8 +371,13 @@ export default function AlertesPage() {
                     <TableCell className="text-[15px]">
                       <div className="flex items-center gap-2">
                         <Icon className="h-4 w-4 text-muted-foreground" />
-                        {alarm.description}
+                        <span>{alarm.description}</span>
                       </div>
+                      {alarm.justification ? (
+                        <div className="mt-1 text-xs text-muted-foreground">
+                          {t.justification}: {alarm.justification}
+                        </div>
+                      ) : null}
                     </TableCell>
                     <TableCell>
                       <Badge className={cn("text-xs", config.className)}>

@@ -31,6 +31,7 @@ export interface ActiveAlarmItem {
   timestamp: string;
   equipment: string;
   description: string;
+  justification?: string;
   severity: "Critique" | "Moyen" | "Info";
   status: "En cours" | "Acquitté";
 }
@@ -98,6 +99,11 @@ export function ActiveAlarms({
                         <p className="text-xs text-muted-foreground">
                           {alarm.equipment} — {new Date(alarm.timestamp).toLocaleString("fr-FR")}
                         </p>
+                        {alarm.justification ? (
+                          <p className="text-xs text-muted-foreground">
+                            {t.justification}: {alarm.justification}
+                          </p>
+                        ) : null}
                       </div>
                     </div>
                     <div className="flex items-center gap-3">

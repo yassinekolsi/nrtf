@@ -11,6 +11,7 @@ import {
   Tooltip,
   Legend,
   ResponsiveContainer,
+  Sankey,
 } from "recharts";
 import { Upload } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -30,6 +31,8 @@ import {
   fetchDocumentsSummary,
   type DocumentRecord,
   type DocumentsSummary,
+  fetchScadaSummary,
+  type ScadaSummary,
 } from "@/lib/api-client";
 import { useLanguage } from "@/lib/language-context";
 
@@ -99,6 +102,7 @@ export default function EnergiePage() {
   const { t } = useLanguage();
   const [activeTab, setActiveTab] = useState("consumption");
   const [summary, setSummary] = useState<DocumentsSummary | null>(null);
+  const [scadaSummary, setScadaSummary] = useState<ScadaSummary | null>(null);
   const [electricityDocs, setElectricityDocs] = useState<DocumentRecord[]>([]);
   const [gasDocs, setGasDocs] = useState<DocumentRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -108,13 +112,15 @@ export default function EnergiePage() {
     async function loadEnergyData() {
       try {
         setLoading(true);
-        const [summaryResult, electricityResult, gasResult] = await Promise.all([
+        const [summaryResult, electricityResult, gasResult, scadaResult] = await Promise.all([
           fetchDocumentsSummary(),
           fetchDocuments({ doc_type: "STEG_ELECTRICITY", limit: 12 }),
           fetchDocuments({ doc_type: "STEG_GAS", limit: 12 }),
+          fetchScadaSummary(),
         ]);
 
         setSummary(summaryResult);
+        setScadaSummary(scadaResult);
         setElectricityDocs(electricityResult);
         setGasDocs(gasResult);
         setError(null);
@@ -132,6 +138,38 @@ export default function EnergiePage() {
     () => buildMonthlyRows(electricityDocs, gasDocs),
     [electricityDocs, gasDocs],
   );
+
+  const gasTotalKwh = useMemo(
+    () => gasDocs.reduce((sum, doc) => sum + (doc.normalized_kwh ?? 0), 0),
+    [gasDocs],
+  );
+  const gridTotalKwh = useMemo(
+    () => electricityDocs.reduce((sum, doc) => sum + (doc.normalized_kwh ?? 0), 0),
+    [electricityDocs],
+  );
+  const trigenerationKwh = scadaSummary?.total_normalized_kwh ?? 0;
+  const gasTotalMwh = gasTotalKwh / 1000;
+  const gridTotalMwh = gridTotalKwh / 1000;
+  const trigenerationMwh = trigenerationKwh / 1000;
+  const totalSupplyMwh = gasTotalMwh + gridTotalMwh + trigenerationMwh;
+
+  const sankeyData = useMemo(() => {
+    const nodes = [
+      { name: "Gas invoices" },
+      { name: "Grid import (STEG)" },
+      { name: "Trigeneration (SCADA)" },
+      { name: "Site demand" },
+    ];
+    const links = [
+      { source: 0, target: 3, value: gasTotalMwh },
+      { source: 1, target: 3, value: gridTotalMwh },
+      { source: 2, target: 3, value: trigenerationMwh },
+    ].filter((link) => link.value > 0);
+
+    return { nodes, links };
+  }, [gasTotalMwh, gridTotalMwh, trigenerationMwh]);
+
+  const hasFlowData = sankeyData.links.length > 0;
 
   const chartData = monthlyRows.map((row) => ({
     month: row.month,
@@ -178,6 +216,50 @@ export default function EnergiePage() {
           ))}
         </div>
       ) : null}
+
+      <Card className="border-border bg-card">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-lg font-semibold">
+            Energy Flow (Billing + SCADA)
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="mb-4 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+            <span>Total supply: {formatNumber(totalSupplyMwh, 1)} MWh</span>
+            <span>Gas: {formatNumber(gasTotalMwh, 1)} MWh</span>
+            <span>Grid: {formatNumber(gridTotalMwh, 1)} MWh</span>
+            <span>Trigeneration: {formatNumber(trigenerationMwh, 1)} MWh</span>
+          </div>
+          <div className="h-[320px] w-full">
+            {loading ? (
+              <Skeleton className="h-full w-full" />
+            ) : !hasFlowData ? (
+              <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                No flow data yet
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height="100%">
+                <Sankey
+                  data={sankeyData}
+                  nodePadding={28}
+                  nodeWidth={14}
+                  link={{ stroke: "var(--chart-1)", strokeOpacity: 0.35 }}
+                >
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: "var(--card)",
+                      border: "1px solid var(--border)",
+                      borderRadius: "12px",
+                      fontSize: "12px",
+                    }}
+                    formatter={(value: number) => `${formatNumber(value, 1)} MWh`}
+                  />
+                </Sankey>
+              </ResponsiveContainer>
+            )}
+          </div>
+        </CardContent>
+      </Card>
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
         <TabsList className="grid w-full max-w-md grid-cols-2">

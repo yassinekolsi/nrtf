@@ -3,21 +3,34 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { 
+  Activity,
+  BrainCircuit,
+  Cpu,
   LayoutDashboard, 
   Zap, 
   Settings2, 
   Database,
   FileText, 
-  AlertTriangle 
+  AlertTriangle,
+  Leaf,
+  Flame,
+  Snowflake
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useLanguage } from "@/lib/language-context";
+import { prefetchRouteData } from "@/lib/prefetch";
 
 const navItems = [
+  { href: "/command-center", icon: Activity, labelKey: "commandCenter" as const },
   { href: "/dashboard", icon: LayoutDashboard, labelKey: "dashboard" as const },
+  { href: "/edge-intelligence", icon: BrainCircuit, labelKey: "edgeIntelligence" as const },
   { href: "/energie", icon: Zap, labelKey: "energy" as const },
-  { href: "/trigeneration", icon: Settings2, labelKey: "trigenerationLive" as const },
-  { href: "/scada", icon: Database, labelKey: "trigeneration" as const },
+  { href: "/trigeneration", icon: Settings2, labelKey: "trigeneration" as const },
+  { href: "/chilled-water", icon: Snowflake, labelKey: "chilledWaterPage" as const },
+  { href: "/co2", icon: Leaf, labelKey: "co2" as const },
+  { href: "/recovery", icon: Flame, labelKey: "heatRecovery" as const },
+  { href: "/fleet", icon: Cpu, labelKey: "fleetControl" as const },
+  { href: "/scada", icon: Database, labelKey: "scada" as const },
   { href: "/documents", icon: FileText, labelKey: "documents" as const },
   { href: "/alertes", icon: AlertTriangle, labelKey: "alerts" as const },
 ];
@@ -25,6 +38,11 @@ const navItems = [
 export function Sidebar() {
   const pathname = usePathname();
   const { t } = useLanguage();
+
+  const handlePrefetch = (href: string) => {
+    if (href === "/alertes") return;
+    prefetchRouteData(href);
+  };
 
   return (
     <aside className="fixed left-0 top-0 z-40 flex h-screen w-64 flex-col border-r border-sidebar-border/70 bg-sidebar text-sidebar-foreground">
@@ -53,6 +71,8 @@ export function Sidebar() {
             <Link
               key={item.href}
               href={item.href}
+              onMouseEnter={() => handlePrefetch(item.href)}
+              onFocus={() => handlePrefetch(item.href)}
               className={cn(
                 "flex items-center gap-3 rounded-full border border-transparent px-4 py-3 text-[0.8rem] font-medium uppercase tracking-[0.18em] transition-[color,background-color,border-color]",
                 isActive

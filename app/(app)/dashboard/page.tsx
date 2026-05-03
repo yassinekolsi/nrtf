@@ -10,8 +10,7 @@ import {
   fetchDocumentsSummary,
   fetchEvents,
   fetchEventStats,
-  fetchTelemetryLatest,
-  fetchTelemetryStats,
+  fetchTelemetryLiveSnapshot,
   type DocumentsSummary,
   type EventStats,
   type TelemetryReading,
@@ -28,12 +27,90 @@ const SENSOR_IDS = {
   voltage: "acs712_nominal_voltage_01",
 };
 
+const LIVE_SENSOR_IDS = Object.values(SENSOR_IDS);
+const LIVE_POLL_MS = 2_000;
+
 function getReading(readings: TelemetryReading[], sensorId: string) {
   return readings.find((reading) => reading.sensor_id === sensorId);
 }
 
 function formatValue(value: number | undefined, digits = 1) {
   return typeof value === "number" ? Number(value.toFixed(digits)) : "--";
+}
+
+function formatNumber(value: number, digits = 2) {
+  return Number(value.toFixed(digits)).toLocaleString("fr-FR");
+}
+
+function toNumber(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function downsampleReadings<T extends { timestamp_ms: number }>(readings: T[], maxPoints = 1200) {
+  if (readings.length <= maxPoints) return readings;
+  const step = Math.ceil(readings.length / maxPoints);
+  const sampled = readings.filter((_, index) => index % step === 0);
+  const last = readings[readings.length - 1];
+  if (sampled[sampled.length - 1]?.timestamp_ms !== last.timestamp_ms) {
+    sampled.push(last);
+  }
+  return sampled;
+}
+
+function formatHistoryTime(timestampMs: number) {
+  return new Date(timestampMs).toLocaleTimeString("fr-FR", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function buildLiveHistoryData(history: Record<string, TelemetryReading[]>) {
+  const combined = new Map<number, PowerChartPoint>();
+  const addReadings = (sensorId: string, key: string) => {
+    (history[sensorId] ?? []).forEach((reading) => {
+      const timestamp = reading.timestamp_ms;
+      const entry = combined.get(timestamp) ?? {
+        time: formatHistoryTime(timestamp),
+      };
+      combined.set(timestamp, { ...entry, [key]: reading.value });
+    });
+  };
+
+  addReadings(SENSOR_IDS.temperature, "temperature");
+  addReadings(SENSOR_IDS.humidity, "humidity");
+  addReadings(SENSOR_IDS.vibration, "vibration");
+
+  const merged = Array.from(combined.entries())
+    .map(([timestamp_ms, point]) => ({ ...point, timestamp_ms }))
+    .sort((a, b) => a.timestamp_ms - b.timestamp_ms);
+
+  return downsampleReadings(merged);
+}
+
+function getTemperatureStatus(value: number | undefined) {
+  if (value === undefined) return "normal";
+  if (value <= 30) return "good";
+  if (value <= 35) return "warning";
+  return "critical";
+}
+
+function getHumidityStatus(value: number | undefined) {
+  if (value === undefined) return "normal";
+  if (value >= 35 && value <= 70) return "good";
+  if (value >= 25 && value <= 80) return "warning";
+  return "critical";
+}
+
+function getVibrationStatus(value: number | undefined) {
+  if (value === undefined) return "normal";
+  if (value <= 1.5) return "good";
+  if (value <= 2) return "warning";
+  return "critical";
 }
 
 function mapSeverity(severity: string): ActiveAlarmItem["severity"] {
@@ -50,51 +127,80 @@ export default function DashboardPage() {
   const [documentsSummary, setDocumentsSummary] = useState<DocumentsSummary | null>(null);
   const [eventStats, setEventStats] = useState<EventStats | null>(null);
   const [activeAlarms, setActiveAlarms] = useState<ActiveAlarmItem[]>([]);
-  const [powerChartData, setPowerChartData] = useState<PowerChartPoint[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [last24HoursData, setLast24HoursData] = useState<PowerChartPoint[]>([]);
+  const [metadataLoading, setMetadataLoading] = useState(true);
+  const [historyLoading, setHistoryLoading] = useState(true);
   const [metadataError, setMetadataError] = useState<string | null>(null);
   const [telemetryError, setTelemetryError] = useState<string | null>(null);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+
+  const buildJustification = useCallback(
+    (contextData: Record<string, unknown> | null | undefined) => {
+      if (!contextData || typeof contextData !== "object") return undefined;
+
+      const parts: string[] = [];
+      const sensorId = contextData.sensor_id;
+      const quality = contextData.quality;
+      const windowValue = toNumber(contextData.window);
+      const value = toNumber(contextData.value);
+      const expected = toNumber(contextData.expected);
+      const stddev = toNumber(contextData.stddev);
+      const confidence = toNumber(contextData.confidence);
+
+      if (typeof sensorId === "string" && sensorId.trim()) {
+        parts.push(`${t.sensor}: ${sensorId}`);
+      }
+      if (value !== null) {
+        parts.push(`${t.value}: ${formatNumber(value)}`);
+      }
+      if (expected !== null) {
+        parts.push(`${t.expected}: ${formatNumber(expected)}`);
+      }
+      if (stddev !== null) {
+        parts.push(`${t.stddev}: ${formatNumber(stddev)}`);
+      }
+      if (confidence !== null) {
+        const pct = confidence <= 1 ? confidence * 100 : confidence;
+        parts.push(`${t.confidence}: ${pct.toFixed(0)}%`);
+      }
+      if (typeof quality === "string" && quality.trim()) {
+        parts.push(`${t.quality}: ${quality}`);
+      }
+      if (windowValue !== null) {
+        parts.push(`${t.window}: ${windowValue}`);
+      }
+
+      return parts.length ? parts.join(" · ") : undefined;
+    },
+    [t],
+  );
 
   const loadTelemetry = useCallback(async () => {
     try {
-      const [stats, latest] = await Promise.all([
-        fetchTelemetryStats(),
-        fetchTelemetryLatest(),
-      ]);
-
-      setTelemetryStats(stats);
-      setLatestReadings(latest);
+      const snapshot = await fetchTelemetryLiveSnapshot(LIVE_SENSOR_IDS);
+      setTelemetryStats(snapshot.stats);
+      setLatestReadings(snapshot.latest);
+      setLast24HoursData(buildLiveHistoryData(snapshot.history));
       setTelemetryError(null);
-
-      const powerReading = getReading(latest, SENSOR_IDS.power);
-      if (powerReading) {
-        setPowerChartData((prev) => {
-          const nextPoint: PowerChartPoint = {
-            time: new Date(powerReading.timestamp_ms).toLocaleTimeString("fr-FR", {
-              hour: "2-digit",
-              minute: "2-digit",
-              second: "2-digit",
-            }),
-            puissanceMoteur: powerReading.value,
-          };
-          return [...prev.slice(-23), nextPoint];
-        });
-      }
+      setHistoryError(null);
     } catch (error) {
-      setTelemetryError(error instanceof Error ? error.message : "Telemetry unavailable");
+      const message = error instanceof Error ? error.message : "Live telemetry unavailable";
+      setTelemetryError(message);
+      setHistoryError(message);
     } finally {
-      setLoading(false);
+      setHistoryLoading(false);
     }
   }, []);
 
   useEffect(() => {
     loadTelemetry();
-    const interval = window.setInterval(loadTelemetry, 10_000);
+    const interval = window.setInterval(loadTelemetry, LIVE_POLL_MS);
     return () => window.clearInterval(interval);
   }, [loadTelemetry]);
 
   useEffect(() => {
     async function loadMetadata() {
+      setMetadataLoading(true);
       try {
         const [summary, statsResult, eventsResult] = await Promise.allSettled([
           fetchDocumentsSummary(),
@@ -115,12 +221,12 @@ export default function DashboardPage() {
               timestamp: event.timestamp,
               equipment: event.source,
               description: event.description,
+              justification: buildJustification(event.context_data),
               severity: mapSeverity(event.severity),
               status: event.acknowledged ? "Acquitté" : "En cours",
             })),
           );
         }
-
         const firstError = [summary, statsResult, eventsResult].find(
           (result) => result.status === "rejected",
         );
@@ -133,11 +239,13 @@ export default function DashboardPage() {
         }
       } catch (error) {
         setMetadataError(error instanceof Error ? error.message : "API metadata unavailable");
+      } finally {
+        setMetadataLoading(false);
       }
     }
 
     loadMetadata();
-  }, []);
+  }, [buildJustification]);
 
   const sensors = useMemo(
     () => ({
@@ -151,6 +259,32 @@ export default function DashboardPage() {
     [latestReadings],
   );
   const powerUnit = sensors.power?.unit || "W";
+  const last24HoursSeries = useMemo(
+    () => [
+      {
+        key: "temperature",
+        label: t.temperature,
+        unit: sensors.temperature?.unit || t.celsius,
+        color: "var(--chart-1)",
+        yAxisId: "environment",
+      },
+      {
+        key: "humidity",
+        label: t.humidity,
+        unit: sensors.humidity?.unit || "%",
+        color: "var(--chart-2)",
+        yAxisId: "environment",
+      },
+      {
+        key: "vibration",
+        label: t.vibration,
+        unit: sensors.vibration?.unit || "g",
+        color: "var(--chart-3)",
+        yAxisId: "vibration",
+      },
+    ],
+    [sensors.humidity?.unit, sensors.temperature?.unit, sensors.vibration?.unit, t],
+  );
 
   const handleAcknowledge = async (eventId: string) => {
     await acknowledgeEvent(eventId);
@@ -180,6 +314,9 @@ export default function DashboardPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <Badge className="bg-energy-green text-energy-green-foreground">
+            Live from ESP32
+          </Badge>
           {eventStats && eventStats.unacknowledged > 0 && (
             <Badge variant="destructive" className="bg-alarm-red text-alarm-red-foreground">
               {eventStats.unacknowledged} alerts
@@ -193,9 +330,9 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {(telemetryError || metadataError) && (
+      {(telemetryError || metadataError || historyError) && (
         <div className="rounded-md border border-border bg-muted/30 p-3 text-sm text-muted-foreground">
-          {telemetryError ?? metadataError}
+          {telemetryError ?? metadataError ?? historyError}
         </div>
       )}
 
@@ -211,22 +348,14 @@ export default function DashboardPage() {
         <KPICard
           label={t.temperature}
           value={formatValue(sensors.temperature?.value)}
-          unit={t.celsius}
-          status={
-            sensors.temperature?.value === undefined
-              ? "normal"
-              : sensors.temperature.value <= 30
-              ? "good"
-              : sensors.temperature.value <= 35
-              ? "warning"
-              : "critical"
-          }
+          unit={sensors.temperature?.unit || t.celsius}
+          status={getTemperatureStatus(sensors.temperature?.value)}
         />
         <KPICard
-          label="Humidity"
+          label={t.humidity}
           value={formatValue(sensors.humidity?.value)}
-          unit="%"
-          status="normal"
+          unit={sensors.humidity?.unit || "%"}
+          status={getHumidityStatus(sensors.humidity?.value)}
         />
         <KPICard
           label="Current"
@@ -241,10 +370,10 @@ export default function DashboardPage() {
           status="normal"
         />
         <KPICard
-          label="Vibration"
+          label={t.vibration}
           value={formatValue(sensors.vibration?.value, 2)}
-          unit={sensors.vibration?.unit || ""}
-          status={sensors.vibration?.value && sensors.vibration.value > 2 ? "warning" : "good"}
+          unit={sensors.vibration?.unit || "g"}
+          status={getVibrationStatus(sensors.vibration?.value)}
         />
         <KPICard
           label="Document Energy"
@@ -262,17 +391,27 @@ export default function DashboardPage() {
 
       {/* Power Chart */}
       <PowerChart
-        data={powerChartData}
-        loading={loading}
-        error={telemetryError}
-        unit={powerUnit}
+        data={last24HoursData}
+        series={last24HoursSeries}
+        yAxes={[
+          { id: "environment", orientation: "left", domain: [0, 100], tickDigits: 0 },
+          {
+            id: "vibration",
+            orientation: "right",
+            domain: [0, 2],
+            tickDigits: 1,
+            allowDataOverflow: true,
+          },
+        ]}
+        loading={historyLoading}
+        error={historyError}
       />
 
       {/* Active Alarms */}
       <ActiveAlarms
         alarms={activeAlarms}
         activeCount={eventStats?.unacknowledged ?? activeAlarms.length}
-        loading={loading}
+        loading={metadataLoading}
         error={metadataError}
         onAcknowledge={handleAcknowledge}
       />

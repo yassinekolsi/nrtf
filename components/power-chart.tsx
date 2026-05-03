@@ -16,20 +16,40 @@ import { useLanguage } from "@/lib/language-context";
 
 export interface PowerChartPoint {
   time: string;
-  puissanceMoteur: number;
-  importSTEG?: number;
+  timestamp_ms?: number;
+  [key: string]: number | string | undefined;
+}
+
+export interface PowerChartSeries {
+  key: string;
+  label: string;
+  unit?: string;
+  color?: string;
+  yAxisId?: string;
+}
+
+export interface PowerChartAxis {
+  id: string;
+  orientation?: "left" | "right";
+  domain?: [number | "auto" | "dataMin" | "dataMax", number | "auto" | "dataMin" | "dataMax"];
+  tickDigits?: number;
+  allowDataOverflow?: boolean;
+  hide?: boolean;
 }
 
 interface PowerChartProps {
   data: PowerChartPoint[];
+  series: PowerChartSeries[];
+  yAxes?: PowerChartAxis[];
   loading?: boolean;
   error?: string | null;
-  unit?: string;
 }
 
-export function PowerChart({ data, loading = false, error = null, unit }: PowerChartProps) {
+export function PowerChart({ data, series, yAxes, loading = false, error = null }: PowerChartProps) {
   const { t } = useLanguage();
-  const displayUnit = unit ?? t.kw;
+  const seriesByKey = new Map(series.map((item) => [item.key, item]));
+  const axes = yAxes?.length ? yAxes : [{ id: "default" }];
+  const defaultAxisId = axes[0]?.id ?? "default";
 
   return (
     <Card className="border-border bg-card">
@@ -62,13 +82,21 @@ export function PowerChart({ data, loading = false, error = null, unit }: PowerC
                   axisLine={false}
                   className="text-muted-foreground"
                 />
-                <YAxis
-                  tick={{ fontSize: 12 }}
-                  tickLine={false}
-                  axisLine={false}
-                  className="text-muted-foreground"
-                  tickFormatter={(value: number) => `${value.toFixed(1)}`}
-                />
+                {axes.map((axis) => (
+                  <YAxis
+                    key={axis.id}
+                    yAxisId={axis.id}
+                    orientation={axis.orientation ?? "left"}
+                    domain={axis.domain}
+                    allowDataOverflow={axis.allowDataOverflow}
+                    hide={axis.hide}
+                    tick={{ fontSize: 12 }}
+                    tickLine={false}
+                    axisLine={false}
+                    className="text-muted-foreground"
+                    tickFormatter={(value: number) => `${Number(value).toFixed(axis.tickDigits ?? 1)}`}
+                  />
+                ))}
                 <Tooltip
                   contentStyle={{
                     backgroundColor: "var(--card)",
@@ -77,20 +105,33 @@ export function PowerChart({ data, loading = false, error = null, unit }: PowerC
                     fontSize: "14px",
                   }}
                   labelStyle={{ fontWeight: 600 }}
-                  formatter={(value: number) => [`${value.toFixed(2)} ${displayUnit}`, t.enginePower]}
+                  formatter={(value: number, name, props) => {
+                    const dataKey = String(props.dataKey ?? name);
+                    const seriesEntry = seriesByKey.get(dataKey);
+                    const label = seriesEntry?.label ?? name;
+                    const numeric = typeof value === "number" ? value : Number(value);
+                    if (!Number.isFinite(numeric)) return [value, label];
+                    const unit = seriesEntry?.unit ?? "";
+                    const formatted = `${numeric.toFixed(2)}${unit ? ` ${unit}` : ""}`;
+                    return [formatted, label];
+                  }}
                 />
                 <Legend
                   wrapperStyle={{ fontSize: "14px", paddingTop: "16px" }}
                 />
-                <Line
-                  type="monotone"
-                  dataKey="puissanceMoteur"
-                  name={t.enginePower}
-                  stroke="var(--chart-1)"
-                  strokeWidth={2}
-                  dot={data.length === 1}
-                  activeDot={{ r: 4 }}
-                />
+                {series.map((item, index) => (
+                  <Line
+                    key={item.key}
+                    type="monotone"
+                    dataKey={item.key}
+                    yAxisId={item.yAxisId ?? defaultAxisId}
+                    name={item.label}
+                    stroke={item.color ?? `var(--chart-${index + 1})`}
+                    strokeWidth={2}
+                    dot={data.length === 1}
+                    activeDot={{ r: 4 }}
+                  />
+                ))}
               </LineChart>
             </ResponsiveContainer>
           )}

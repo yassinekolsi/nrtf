@@ -3,6 +3,7 @@
 import { ReactNode } from "react";
 import { Sidebar } from "./sidebar";
 import { TopBar } from "./top-bar";
+import { EnergyAssistant } from "./energy-assistant";
 import { LanguageProvider } from "@/lib/language-context";
 
 interface AppShellProps {
@@ -20,6 +21,7 @@ export function AppShell({ children }: AppShellProps) {
             {children}
           </div>
         </main>
+        <EnergyAssistant />
       </div>
     </LanguageProvider>
   );

@@ -85,6 +85,46 @@ const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, '') ||
   'http://127.0.0.1:8000/api'
 
+type CacheEntry<T> = {
+  value: T
+  expiresAt: number
+}
+
+type CacheOptions = {
+  ttlMs?: number
+  skipCache?: boolean
+  cacheKey?: string
+}
+
+const DEFAULT_TTL_MS = 120_000
+const DOCUMENTS_SUMMARY_TTL_MS = 300_000
+const DOCUMENTS_LIST_TTL_MS = 120_000
+const CO2_MONTHLY_TTL_MS = 300_000
+
+const responseCache = new Map<string, CacheEntry<unknown>>()
+const inflightRequests = new Map<string, Promise<unknown>>()
+
+function buildCacheKey(path: string, init?: RequestInit, overrideKey?: string) {
+  if (overrideKey) return overrideKey
+  const method = init?.method?.toUpperCase() ?? 'GET'
+  return `${method}:${path}`
+}
+
+function readCache<T>(key: string) {
+  const entry = responseCache.get(key)
+  if (!entry) return null
+  if (Date.now() > entry.expiresAt) {
+    responseCache.delete(key)
+    return null
+  }
+  return entry.value as T
+}
+
+function writeCache<T>(key: string, value: T, ttlMs: number) {
+  if (!Number.isFinite(ttlMs) || ttlMs <= 0) return
+  responseCache.set(key, { value, expiresAt: Date.now() + ttlMs })
+}
+
 async function parseError(response: Response): Promise<string> {
   try {
     const payload = await response.json()
@@ -116,16 +156,51 @@ async function parseError(response: Response): Promise<string> {
   }
 }
 
-async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...init,
-  })
+async function apiFetch<T>(
+  path: string,
+  init?: RequestInit,
+  options?: CacheOptions
+): Promise<T> {
+  const method = init?.method?.toUpperCase() ?? 'GET'
+  const skipCache = options?.skipCache || method !== 'GET'
+  const cacheKey = buildCacheKey(path, init, options?.cacheKey)
 
-  if (!response.ok) {
-    throw new Error(await parseError(response))
+  if (!skipCache) {
+    const cached = readCache<T>(cacheKey)
+    if (cached) return cached
+
+    const inflight = inflightRequests.get(cacheKey)
+    if (inflight) return inflight as Promise<T>
   }
 
-  return response.json() as Promise<T>
+  const request = (async () => {
+    const response = await fetch(`${API_BASE_URL}${path}`, {
+      ...init,
+    })
+
+    if (!response.ok) {
+      throw new Error(await parseError(response))
+    }
+
+    const data = (await response.json()) as T
+    if (!skipCache) {
+      writeCache(cacheKey, data, options?.ttlMs ?? DEFAULT_TTL_MS)
+    }
+
+    return data
+  })()
+
+  if (!skipCache) {
+    inflightRequests.set(cacheKey, request)
+  }
+
+  try {
+    return await request
+  } finally {
+    if (!skipCache) {
+      inflightRequests.delete(cacheKey)
+    }
+  }
 }
 
 export function getDocumentsApiBaseUrl() {
@@ -149,20 +224,20 @@ export function fetchDocuments(options?: {
   }
 
   const suffix = search.toString() ? `?${search.toString()}` : ''
-  return apiFetch<DocumentRecord[]>(`/documents${suffix}`, {
-    cache: 'no-store',
+  return apiFetch<DocumentRecord[]>(`/documents${suffix}`, undefined, {
+    ttlMs: DOCUMENTS_LIST_TTL_MS,
   })
 }
 
 export function fetchDocumentsSummary() {
-  return apiFetch<DocumentsSummary>('/documents/summary', {
-    cache: 'no-store',
+  return apiFetch<DocumentsSummary>('/documents/summary', undefined, {
+    ttlMs: DOCUMENTS_SUMMARY_TTL_MS,
   })
 }
 
 export function fetchDocumentsCo2Monthly() {
-  return apiFetch<DocumentsCo2MonthlyResponse>('/documents/co2/monthly', {
-    cache: 'no-store',
+  return apiFetch<DocumentsCo2MonthlyResponse>('/documents/co2/monthly', undefined, {
+    ttlMs: CO2_MONTHLY_TTL_MS,
   })
 }
 

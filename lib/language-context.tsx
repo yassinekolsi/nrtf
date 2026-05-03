@@ -7,12 +7,17 @@ type Language = "en" | "fr";
 interface Translations {
   // Navigation
   dashboard: string;
+  commandCenter: string;
+  edgeIntelligence: string;
   energy: string;
   trigeneration: string;
-  trigenerationLive: string;
   scada: string;
   documents: string;
   alerts: string;
+  co2: string;
+  heatRecovery: string;
+  chilledWaterPage: string;
+  fleetControl: string;
   
   // Top bar
   siteName: string;
@@ -20,6 +25,8 @@ interface Translations {
   // Dashboard
   enginePower: string;
   temperature: string;
+  humidity: string;
+  vibration: string;
   stegImport: string;
   powerFactor: string;
   activeAlarms: string;
@@ -77,6 +84,26 @@ interface Translations {
   allEquipment: string;
   allSeverities: string;
   filterByDate: string;
+
+  // CO2 page
+  co2Emissions: string;
+  emissionFactors: string;
+  monthlyEmissions: string;
+  gridElectricity: string;
+  naturalGas: string;
+  selfProduced: string;
+  co2FromDocuments: string;
+  co2FromScada: string;
+  totalCo2: string;
+  scadaGas: string;
+  justification: string;
+  sensor: string;
+  value: string;
+  expected: string;
+  confidence: string;
+  quality: string;
+  window: string;
+  stddev: string;
   
   // Common
   kw: string;
@@ -89,12 +116,17 @@ const translations: Record<Language, Translations> = {
   en: {
     // Navigation
     dashboard: "Dashboard",
+    commandCenter: "Command Center",
+    edgeIntelligence: "Edge Intelligence",
     energy: "Energy & Billing",
     trigeneration: "Tri-generation",
-    trigenerationLive: "Tri-generation Live",
     scada: "SCADA",
     documents: "Documents",
     alerts: "Alerts & History",
+    co2: "CO2 Emissions",
+    heatRecovery: "Heat Recovery",
+    chilledWaterPage: "Chilled Water",
+    fleetControl: "Fleet Control Center",
     
     // Top bar
     siteName: "Kilani Group — Adwya Site",
@@ -102,6 +134,8 @@ const translations: Record<Language, Translations> = {
     // Dashboard
     enginePower: "Engine Power",
     temperature: "Temperature",
+    humidity: "Humidity",
+    vibration: "Vibration",
     stegImport: "STEG Import",
     powerFactor: "Power Factor",
     activeAlarms: "Active Alarms",
@@ -159,6 +193,26 @@ const translations: Record<Language, Translations> = {
     allEquipment: "All Equipment",
     allSeverities: "All Severities",
     filterByDate: "Filter by Date",
+
+    // CO2 page
+    co2Emissions: "CO2 Emissions",
+    emissionFactors: "Emission Factors",
+    monthlyEmissions: "Monthly Emissions",
+    gridElectricity: "Grid Electricity",
+    naturalGas: "Natural Gas",
+    selfProduced: "Self Produced",
+    co2FromDocuments: "CO2 from Documents",
+    co2FromScada: "CO2 from SCADA",
+    totalCo2: "Total CO2",
+    scadaGas: "SCADA Gas",
+    justification: "Justification",
+    sensor: "Sensor",
+    value: "Value",
+    expected: "Expected",
+    confidence: "Confidence",
+    quality: "Quality",
+    window: "Window",
+    stddev: "Std dev",
     
     // Common
     kw: "kW",
@@ -169,12 +223,17 @@ const translations: Record<Language, Translations> = {
   fr: {
     // Navigation
     dashboard: "Tableau de Bord",
+    commandCenter: "Centre de commande",
+    edgeIntelligence: "Edge Intelligence",
     energy: "Énergie & Facturation",
     trigeneration: "Tri-génération",
-    trigenerationLive: "Tri-génération Live",
     scada: "SCADA",
     documents: "Documents",
     alerts: "Alertes & Historique",
+    co2: "Émissions CO2",
+    heatRecovery: "Récupération de chaleur",
+    chilledWaterPage: "Eau glacée",
+    fleetControl: "Fleet Control Center",
     
     // Top bar
     siteName: "Kilani Group — Site Adwya",
@@ -182,6 +241,8 @@ const translations: Record<Language, Translations> = {
     // Dashboard
     enginePower: "Puissance Moteur",
     temperature: "Temperature",
+    humidity: "Humidité",
+    vibration: "Vibration",
     stegImport: "Import STEG",
     powerFactor: "Facteur de Puissance",
     activeAlarms: "Alarmes Actives",
@@ -239,6 +300,26 @@ const translations: Record<Language, Translations> = {
     allEquipment: "Tous les Équipements",
     allSeverities: "Toutes les Sévérités",
     filterByDate: "Filtrer par Date",
+
+    // CO2 page
+    co2Emissions: "Émissions CO2",
+    emissionFactors: "Facteurs d'émission",
+    monthlyEmissions: "Émissions Mensuelles",
+    gridElectricity: "Électricité Réseau",
+    naturalGas: "Gaz Naturel",
+    selfProduced: "Autoproduction",
+    co2FromDocuments: "CO2 des Documents",
+    co2FromScada: "CO2 SCADA",
+    totalCo2: "CO2 Total",
+    scadaGas: "Gaz SCADA",
+    justification: "Justification",
+    sensor: "Capteur",
+    value: "Valeur",
+    expected: "Attendu",
+    confidence: "Confiance",
+    quality: "Qualité",
+    window: "Fenêtre",
+    stddev: "Écart-type",
     
     // Common
     kw: "kW",

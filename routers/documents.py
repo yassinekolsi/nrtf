@@ -22,7 +22,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models import Documents
+from models import Documents, ScadaLedger
 from schemas import (
     DocumentReviewUpdate,
     DocumentsBatchUploadItem,
@@ -2540,76 +2540,22 @@ def get_documents_co2_monthly(db: Session = Depends(get_db)) -> dict[str, Any]:
     scada_by_month: dict[str, float] = {}
     inspector = inspect(db.get_bind())
     if "scada_ledger" in inspector.get_table_names():
-        scada_volume_rows = db.execute(
-            text(
-                """
-                WITH ordered AS (
-                    SELECT
-                        timestamp,
-                        (raw_metrics->>'gas_volume_nm3_cumul')::double precision AS gas_cumul,
-                        date_trunc('month', timestamp) AS month,
-                        lag((raw_metrics->>'gas_volume_nm3_cumul')::double precision) OVER (
-                            PARTITION BY date_trunc('month', timestamp)
-                            ORDER BY timestamp
-                        ) AS prev_cumul
-                    FROM scada_ledger
-                    WHERE raw_metrics ? 'gas_volume_nm3_cumul'
-                      AND (raw_metrics->>'gas_volume_nm3_cumul') IS NOT NULL
-                )
-                SELECT
-                    to_char(month, 'MM/YYYY') AS month,
-                    sum(
-                        CASE
-                            WHEN prev_cumul IS NULL THEN 0
-                            WHEN gas_cumul >= prev_cumul THEN gas_cumul - prev_cumul
-                            ELSE 0
-                        END
-                    ) AS gas_volume_nm3
-                FROM ordered
-                GROUP BY month
-                ORDER BY month
-                """
+        month_expr = func.date_trunc("month", ScadaLedger.timestamp)
+        scada_rows = (
+            db.query(
+                func.to_char(month_expr, "MM/YYYY").label("month"),
+                func.coalesce(func.sum(ScadaLedger.normalized_kwh), 0.0).label("gas_kwh"),
             )
-        ).mappings().all()
+            .group_by(month_expr)
+            .order_by(month_expr.asc())
+            .all()
+        )
 
-        scada_flow_rows = db.execute(
-            text(
-                """
-                WITH ordered AS (
-                    SELECT
-                        timestamp,
-                        gas_flow_nm3h,
-                        date_trunc('month', timestamp) AS month,
-                        lag(timestamp) OVER (
-                            PARTITION BY date_trunc('month', timestamp)
-                            ORDER BY timestamp
-                        ) AS prev_ts
-                    FROM scada_ledger
-                    WHERE gas_flow_nm3h IS NOT NULL
-                )
-                SELECT
-                    to_char(month, 'MM/YYYY') AS month,
-                    sum(gas_flow_nm3h * EXTRACT(EPOCH FROM (timestamp - prev_ts)) / 3600.0)
-                        AS gas_volume_nm3
-                FROM ordered
-                WHERE prev_ts IS NOT NULL
-                GROUP BY month
-                ORDER BY month
-                """
-            )
-        ).mappings().all()
-
-        for row in scada_volume_rows:
-            month = row.get("month")
-            volume = row.get("gas_volume_nm3")
-            if month and volume is not None:
-                scada_by_month[str(month)] = float(volume)
-
-        for row in scada_flow_rows:
-            month = row.get("month")
-            volume = row.get("gas_volume_nm3")
-            if month and volume is not None and str(month) not in scada_by_month:
-                scada_by_month[str(month)] = float(volume)
+        for row in scada_rows:
+            month = row.month
+            gas_kwh = row.gas_kwh
+            if month and gas_kwh is not None:
+                scada_by_month[str(month)] = float(gas_kwh)
 
     rows_by_month = {row.billing_month: row for row in rows}
     months = set(rows_by_month.keys()) | set(scada_by_month.keys())
@@ -2624,9 +2570,9 @@ def get_documents_co2_monthly(db: Session = Depends(get_db)) -> dict[str, Any]:
 
         scada_gas_kwh = 0.0
         scada_co2_gas_kg = 0.0
-        scada_volume_nm3 = scada_by_month.get(billing_month)
-        if scada_volume_nm3 is not None:
-            scada_gas_kwh = normalize_gas_to_kwh(scada_volume_nm3, DEFAULT_PCI_FACTOR)
+        scada_month_kwh = scada_by_month.get(billing_month)
+        if scada_month_kwh is not None:
+            scada_gas_kwh = scada_month_kwh
             scada_co2_gas_kg = estimate_co2_kg(scada_gas_kwh, "natural_gas")
 
         monthly.append(
