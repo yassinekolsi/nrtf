@@ -84,7 +84,7 @@ export function TopBar({ onMenuClick }: TopBarProps) {
         <Button
           variant="ghost"
           size="icon"
-          className="md:hidden"
+          className="md:hidden border border-primary/40 text-sidebar-foreground hover:border-primary hover:bg-primary/10 hover:text-primary"
           onClick={onMenuClick}
           aria-label="Open navigation"
         >
