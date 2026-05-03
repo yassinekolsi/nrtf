@@ -1,0 +1,45 @@
+# render.yaml — Infrastructure-as-Code blueprint for Render
+# https://docs.render.com/blueprint-spec
+
+services:
+  # ──────────────────────────────────────────
+  # Backend — FastAPI (Python)
+  # ──────────────────────────────────────────
+  - type: web
+    name: nrtf-backend
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free            # change to "starter" or "standard" for production
+    envVars:
+      - key: DATABASE_URL
+        sync: false       # you'll set this manually in the Render dashboard
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3.1-flash-lite-preview
+      - key: MQTT_HOST
+        sync: false
+      - key: MQTT_PORT
+        value: "8883"
+      - key: MQTT_TLS_ENABLED
+        value: "true"
+      - key: MQTT_USERNAME
+        sync: false
+      - key: MQTT_PASSWORD
+        sync: false
+      - key: MQTT_CA_CERT
+        sync: false
+    healthCheckPath: /
+
+  # ──────────────────────────────────────────
+  # Frontend — Next.js
+  # ──────────────────────────────────────────
+  - type: web
+    name: nrtf-frontend
+    runtime: docker
+    dockerfilePath: ./Dockerfile.frontend
+    plan: free
+    envVars:
+      # This is baked into the JS bundle at build time
+      - key: NEXT_PUBLIC_API_BASE_URL
+        value: https://nrtf-backend.onrender.com/api   # update after backend deploys

@@ -1,21 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Bell, Globe, RadioTower } from "lucide-react";
+import { Bell, Globe } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { useLanguage } from "@/lib/language-context";
-import { fetchEventStats, fetchTelemetryStats } from "@/lib/api-client";
+import { fetchEventStats } from "@/lib/api-client";
 
 const timeRanges = ["1h", "6h", "24h", "7d", "30d", "custom"];
 
-function formatSyncTime(timestampMs: number, locale: string) {
-  if (!timestampMs) return "--";
-  return new Date(timestampMs).toLocaleTimeString(locale, {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
+
 
 export function TopBar() {
   const { language, setLanguage, t } = useLanguage();
@@ -23,7 +16,7 @@ export function TopBar() {
   const [currentDate, setCurrentDate] = useState<string>("");
   const [alarmCount, setAlarmCount] = useState(0);
   const [criticalCount, setCriticalCount] = useState(0);
-  const [lastSeenMs, setLastSeenMs] = useState(0);
+
   const [activeRange, setActiveRange] = useState("24h");
 
   useEffect(() => {
@@ -54,18 +47,15 @@ export function TopBar() {
   useEffect(() => {
     async function loadStatus() {
       try {
-        const [eventStats, telemetryStats] = await Promise.allSettled([
+        const [eventStats] = await Promise.allSettled([
           fetchEventStats(),
-          fetchTelemetryStats(),
         ]);
 
         if (eventStats.status === "fulfilled") {
           setAlarmCount(eventStats.value.unacknowledged);
           setCriticalCount(eventStats.value.critique_count);
         }
-        if (telemetryStats.status === "fulfilled") {
-          setLastSeenMs(telemetryStats.value.last_seen_ms);
-        }
+
       } catch {
         setAlarmCount(0);
         setCriticalCount(0);
@@ -81,8 +71,7 @@ export function TopBar() {
     setLanguage(language === "en" ? "fr" : "en");
   };
 
-  const locale = language === "fr" ? "fr-FR" : "en-US";
-  const isLive = lastSeenMs > 0 && Date.now() - lastSeenMs < 90_000;
+
 
   return (
     <header className="fixed left-64 right-0 top-0 z-30 flex h-20 items-center justify-between gap-5 border-b border-primary/45 bg-sidebar px-8 text-sidebar-foreground">
@@ -121,19 +110,7 @@ export function TopBar() {
 
       {/* Right Section - Language Toggle & Alarm Badge */}
       <div className="flex shrink-0 items-center gap-3">
-        <Badge
-          className={
-            isLive
-              ? "gap-2 border border-energy-green/30 bg-energy-green text-energy-green-foreground"
-              : "gap-2 border border-alarm-red/30 bg-alarm-red text-alarm-red-foreground"
-          }
-        >
-          <RadioTower className="h-3.5 w-3.5" />
-          {isLive ? "IoT streaming" : "Disconnected"}
-        </Badge>
-        <span className="hidden text-xs text-sidebar-foreground/62 2xl:inline">
-          Last sync {formatSyncTime(lastSeenMs, locale)}
-        </span>
+
 
         {/* Language Toggle */}
         <Button

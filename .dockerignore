@@ -1,12 +1,43 @@
-.env
+# Git
 .git
+.gitignore
+
+# Build artifacts
 .next
-node_modules
 __pycache__
 *.py[cod]
+
+# Virtual environments
 .venv
 venv
+
+# Node modules (built inside container)
+node_modules
+
+# Environment files (secrets come from Render dashboard)
+.env
+.env*.local
+
+# Hardware / non-deploy stuff
 NRTF-Hardware
+data/
+
+# IDE & OS
+.vscode
+.idea
+.DS_Store
+*.swp
+
+# Docker volumes
 frontend_node_modules
 frontend_next
+
+# Build info
 tsconfig.tsbuildinfo
+
+# Docs / meta
+AGENT_PROMPTS.txt
+WORKDONE.md
+README.md
+diagram.mermaid
+docs/
