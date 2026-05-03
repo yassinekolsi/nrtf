@@ -14,8 +14,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Application code
 COPY main.py database.py models.py schemas.py ./
 COPY routers/ routers/
-COPY scripts/ scripts/
-COPY data/ data/
 
 # Non-root user
 RUN useradd -m appuser && chown -R appuser:appuser /app
